@@ -45,9 +45,9 @@ To pin by archive and integrity instead of a git tag, replace the first `git_ove
 ```python
 archive_override(
     module_name = "rules_kyverno",
-    urls = ["https://github.com/collider-bazel-extensions/rules_kyverno/archive/refs/tags/v0.1.0.tar.gz"],
-    strip_prefix = "rules_kyverno-0.1.0",
-    integrity = "sha256-xc7ZHthc4xvI9f5GvszfYhjSmwzeZRiXwUl+sqtpY7g=",
+    urls = ["https://github.com/collider-bazel-extensions/rules_kyverno/archive/refs/tags/v0.2.0.tar.gz"],
+    strip_prefix = "rules_kyverno-0.2.0",
+    integrity = "sha256-v7cxKVIuNcjxltFWzjQ70qpFDF8tOcFzN17KTKA2lRI=",
 )
 ```
 
