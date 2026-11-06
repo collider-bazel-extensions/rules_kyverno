@@ -1,0 +1,25 @@
+# Errors behind matchConditions the load probe doesn't meet (#5): a
+# validation, a variable, a messageExpression and an auditAnnotation.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: vap-match-conditions
+spec:
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["apps"]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["deployments"]
+  matchConditions:
+    - name: deployments
+      expression: 'object.kind == "Deployment"'
+  variables:
+    - name: replicas
+      expression: "objet.spec.replicas"
+  validations:
+    - expression: "object.spec.replicas > (0"
+      messageExpression: "'replicas: ' + string(objekt.spec.replicas)"
+  auditAnnotations:
+    - key: owner
+      valueExpression: "owner"

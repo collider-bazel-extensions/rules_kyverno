@@ -1,0 +1,28 @@
+# One Pod the mutation changes; the rest it can't match or leaves alone (#6).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: shop
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: settings
+  namespace: shop
+data: {mode: live}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: labelled
+  namespace: shop
+  labels: {team: payments}
+spec:
+  containers: [{name: app, image: "registry.example/shop:1.0"}]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: no-namespace
+spec:
+  containers: [{name: app, image: "registry.example/shop:1.0"}]

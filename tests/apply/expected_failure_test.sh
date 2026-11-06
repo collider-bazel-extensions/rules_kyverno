@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # kyverno_apply_test failures: a finding not in the list, a stale entry, a
-# malformed list, mutations that differ, image verification offline.
+# malformed list, mutations that differ, image verification offline,
+# duplicate resources.
 set -euo pipefail
 fail() { echo "FAIL: $*" >&2; exit 1; }
 run() {  # run <target> <want exit> → output in $out, JUnit in $TEST_TMPDIR/junit.xml
@@ -37,4 +38,9 @@ grep -q "team: platform" "$TEST_TMPDIR/kyverno-mutated.yaml" || fail "mutated ou
 
 run "$5" 1
 grep -q 'offline_images = "digest" or "strip"' <<<"$out" || fail "no offline hint"
+
+run "$6" 2
+grep -q "^  Role/shop/migration-gate (rbac.authorization.k8s.io/v1) in tests/apply/role.yaml, tests/apply/role_copy.yaml$" <<<"$out" \
+  || fail "duplicate not named with both files"
+grep -q "panic" <<<"$out" && fail "the CLI ran"
 echo "PASS"

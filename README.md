@@ -24,11 +24,11 @@ No host Kyverno or Helm needed. The CLI is the upstream release for linux and da
 ## Install (Bzlmod)
 
 ```python
-bazel_dep(name = "rules_kyverno", version = "0.2.0")
+bazel_dep(name = "rules_kyverno", version = "0.2.1")
 git_override(
     module_name = "rules_kyverno",
     remote = "https://github.com/collider-bazel-extensions/rules_kyverno",
-    tag = "v0.2.0",
+    tag = "v0.2.1",
 )
 
 # rules_kyverno depends on rules_kubectl, which isn't in the BCR either.
@@ -90,7 +90,7 @@ Every build checks each document:
    ```
 
    - **Kyverno kinds** are applied to a resource none of them matches.
-   - **`ValidatingAdmissionPolicy` / `MutatingAdmissionPolicy` and `ImageValidatingPolicy`** are loaded against a ConfigMap: the CLI needs a real kind for them. Each admission policy gets a binding of its own, so its CEL is compiled whether the files bind it or not. Only compile errors count, since the policy may fail on the ConfigMap itself. The pinned CLI (1.19.2) evaluates `MutatingAdmissionPolicy` only at `v1alpha1`; a `v1beta1` one loads without its CEL compiled.
+   - **`ValidatingAdmissionPolicy` / `MutatingAdmissionPolicy` and `ImageValidatingPolicy`** are loaded against a ConfigMap: the CLI needs a real kind for them. Each admission policy gets a binding of its own, so its CEL is compiled whether the files bind it or not. Every expression is compiled: `matchConditions`, `validations` and `mutations` even when the `matchConditions` don't match, and `variables`, `messageExpression` and `auditAnnotations`, whose errors the CLI doesn't report by itself. An error in those three names its field, e.g. `max-replicas (spec.variables[0] (team))`. Only compile errors count, since the policy may fail on the ConfigMap itself. The pinned CLI (1.19.2) evaluates `MutatingAdmissionPolicy` only at `v1alpha1`; a `v1beta1` one loads without its CEL compiled.
    - **Speed:** all files load in one CLI run. Only if that finds problems does each file load on its own, so every problem names its file and one file's compile error doesn't hide another's.
 
 The check runs on the pinned CLI with no network (`--sandbox_default_allow_network=false` works). `deps` bundle other `kyverno_policy` targets in front of `srcs`.
@@ -154,7 +154,7 @@ kyverno //deploy:manifests_comply_test: pass 14, fail 2, warn 0, error 0, skip 0
 - **Exceptions:** `PolicyException`s in `policies` or `exceptions` apply.
 - **Skipped kinds:** cleanup and deleting policies and global context entries act in a cluster, not on a resource, so they're left out of `apply`.
 - **Reports:**
-  - the test writes JUnit to Bazel, and to its undeclared outputs Kyverno's policy report (JSON, `kyverno-report.json`) and the resources as the policies mutate them (`kyverno-mutated.yaml`);
+  - the test writes JUnit to Bazel, and to its undeclared outputs Kyverno's policy report (JSON, `kyverno-report.json`) and the resources the policies changed (`kyverno-mutated.yaml`);
   - `kyverno_check` puts both in the `kyverno` output group (`<name>.kyverno.json`, `<name>.mutated.yaml`).
 
 ### More inputs
@@ -195,7 +195,7 @@ All of them work on `kyverno_check` too. `values_file`, `resource_filters` and `
     reason: owned by the shop team after the Q1 migration (TICKET-123)
   ```
 
-  `*` and `?` work as wildcards in `policy`, `rule` and `resource`. `reason` is required. Unknown fields are refused.
+  `*` and `?` work as wildcards in `policy`, `rule` and `resource`. `reason` is required. Unknown fields are refused. Quote a reason that contains ` #` (`reason: "refused (#188)"`): unquoted, YAML reads the rest as a comment.
 - **`resource_filters`:** a file holding the Kyverno ConfigMap, alone or in a rendered chart. Resources its `resourceFilters` match are left out, as the admission controller skips them.
   - **Which ConfigMap:** the one named `kyverno`, or the only one with `resourceFilters`.
   - **Defaults:** `@rules_kyverno//:kyverno_manifest` is the pinned chart, with its default filters (kube-system, kube-public, kyverno, Events, ReplicaSets, …).
@@ -205,7 +205,10 @@ All of them work on `kyverno_check` too. `values_file`, `resource_filters` and `
   - `"digest"` keeps only the check that matching images are pinned by digest:
     - a `verifyImages` entry keeps its `imageReferences` and `skipImageReferences`, with attestors, attestations and digest mutation removed;
     - an `ImageValidatingPolicy` becomes a `ValidatingPolicy` with the same match rules (`matchImageReferences` globs and expressions, `matchConstraints`, `matchConditions`, autogen). It checks every container's image as written. Custom image extractors (`spec.images`) aren't checked.
-- **`expected_mutations`:** YAML of the resources as the policies should mutate them. Any difference fails, with a diff. They're compared as data, so formatting and key order don't count. The CLI writes every resource a mutating policy matched, changed or not. To update the file, copy `kyverno-mutated.yaml` from the test's outputs.
+- **`expected_mutations`:** YAML of the resources the policies change, as they should come out. Any difference fails, with a diff. They're compared as data, so formatting and key order don't count.
+  - **Only changed resources:** the CLI writes every input resource, so the rule keeps those that differ from their input. Resources no policy matched, or that a policy left as they were, are neither written nor compared. A namespace the CLI fills in as `default` isn't a change, but a changed resource is written with it.
+  - To update the file, copy `kyverno-mutated.yaml` from the test's outputs.
+- **Duplicate resources:** two input resources with the same `apiVersion`, kind, namespace and name (a missing namespace counts as `default`) fail before the CLI runs, naming every file they're in. The CLI can hold each only once, and panics (`… already exists`) otherwise. This applies to `kyverno_mutate` too; resources `resource_filters` leaves out don't count.
 
 ## `kyverno_mutate`
 
@@ -217,7 +220,7 @@ kyverno_mutate(
 )
 ```
 
-This writes the resources as the mutating policies change them, in one multi-document YAML file. It's useful to review what admission will do, or to ship pre-mutated manifests. `values_file`, `resource_filters` and `offline_images` work as on `kyverno_apply_test`.
+This writes every resource as the mutating policies leave it, changed or not, in one multi-document YAML file. It's useful to review what admission will do, or to ship pre-mutated manifests. `values_file`, `resource_filters` and `offline_images` work as on `kyverno_apply_test`.
 
 ## Cluster install
 

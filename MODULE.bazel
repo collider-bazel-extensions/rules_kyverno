@@ -20,7 +20,7 @@ kyverno chart 3.9.2.
 
 module(
     name = "rules_kyverno",
-    version = "0.2.0",
+    version = "0.2.1",
 )
 
 bazel_dep(name = "bazel_skylib", version = "1.8.2")
