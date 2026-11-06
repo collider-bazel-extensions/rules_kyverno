@@ -1,0 +1,7 @@
+- policy: prod-needs-team
+  rule: team
+  resource: Pod/shop/unlabelled
+  reason: shop pods get labels with the Q1 migration
+- policy: prod-needs-team
+  resource: Pod/dev/*
+  reason: "no longer true: dev isn't prod"

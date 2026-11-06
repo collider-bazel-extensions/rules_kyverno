@@ -1,0 +1,68 @@
+# Kubernetes admission policies (enforced by the API server; Kyverno's CLI
+# evaluates them too): a bound VAP, an unbound one with params, and a MAP.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: max-replicas
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["apps"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["deployments"]
+  validations:
+    - expression: "object.spec.replicas <= 5"
+      message: "at most 5 replicas"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: max-replicas
+spec:
+  policyName: max-replicas
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchLabels: {env: prod}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: replica-limit-param
+spec:
+  paramKind: {apiVersion: v1, kind: ConfigMap}
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["apps"]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["deployments"]
+  validations:
+    - expression: "object.spec.replicas <= int(params.data.max)"
+---
+apiVersion: admissionregistration.k8s.io/v1alpha1
+kind: MutatingAdmissionPolicy
+metadata:
+  name: add-owner
+spec:
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["apps"]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["deployments"]
+  failurePolicy: Fail
+  reinvocationPolicy: Never
+  mutations:
+    - patchType: ApplyConfiguration
+      applyConfiguration:
+        expression: 'Object{metadata: Object.metadata{labels: {"owner": "platform"}}}'
+---
+apiVersion: admissionregistration.k8s.io/v1alpha1
+kind: MutatingAdmissionPolicyBinding
+metadata:
+  name: add-owner
+spec:
+  policyName: add-owner

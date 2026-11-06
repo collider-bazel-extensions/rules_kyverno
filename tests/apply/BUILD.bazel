@@ -1,0 +1,135 @@
+# kyverno_apply_test / kyverno_check inputs: values files, expected findings,
+# resource filters, offline image verification, expected mutations.
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("//:defs.bzl", "kyverno_apply_test", "kyverno_check", "kyverno_policy")
+
+kyverno_policy(
+    name = "prod_team",
+    srcs = ["prod_team.yaml"],
+)
+
+kyverno_policy(
+    name = "verify_images",
+    srcs = ["verify_images.yaml"],
+)
+
+# namespaceSelector needs namespace labels: the values file gives them.
+# Pod/shop/unlabelled violates the policy and is an expected finding.
+kyverno_apply_test(
+    name = "values_test",
+    expected_findings = "expected.yaml",
+    policies = [":prod_team"],
+    resources = ["pods.yaml"],
+    values_file = "values.yaml",
+)
+
+# The same as a build-time check.
+kyverno_check(
+    name = "values_check",
+    expected_findings = "expected.yaml",
+    policies = [":prod_team"],
+    resources = ["pods.yaml"],
+    values_file = "values.yaml",
+)
+
+# The chart's own resourceFilters leave the kube-public Pod out.
+kyverno_apply_test(
+    name = "filters_test",
+    policies = ["//tests/policies:team"],
+    resource_filters = "//:kyverno_manifest",
+    resources = ["filtered.yaml"],
+)
+
+# Image verification without network: only the digest check is left, and
+# the tag-pinned Deployment is an expected finding (autogen rule included).
+kyverno_apply_test(
+    name = "offline_digest_test",
+    expected_findings = "images_expected.yaml",
+    offline_images = "digest",
+    policies = [":verify_images"],
+    resources = ["images.yaml"],
+    tags = ["block-network"],
+)
+
+# Stripped: the team policy alone decides.
+kyverno_apply_test(
+    name = "offline_strip_test",
+    offline_images = "strip",
+    policies = [
+        ":verify_images",
+        "//tests/policies:team",
+    ],
+    resources = ["images.yaml"],
+    tags = ["block-network"],
+)
+
+kyverno_apply_test(
+    name = "expected_mutations_test",
+    expected_mutations = "mutated.yaml",
+    policies = ["//tests/policies:mutations"],
+    resources = ["//tests/resources:legacy.yaml"],
+)
+
+# ---- must fail; expected_failure_test runs them ----
+
+[kyverno_apply_test(
+    name = name,
+    expected_findings = expected,
+    policies = [":prod_team"],
+    resources = ["pods.yaml"],
+    tags = ["manual"],
+    values_file = "values.yaml",
+) for name, expected in [
+    ("unexpected", None),
+    ("stale", "stale.yaml"),
+    ("bad_expected", "bad_expected.yaml"),
+]]
+
+kyverno_apply_test(
+    name = "wrong_mutations",
+    expected_mutations = "wrong_mutated.yaml",
+    policies = ["//tests/policies:mutations"],
+    resources = ["//tests/resources:legacy.yaml"],
+    tags = ["manual"],
+)
+
+# Without offline_images, verification reaches for the registry.
+kyverno_apply_test(
+    name = "online_images",
+    policies = [":verify_images"],
+    resources = ["images.yaml"],
+    tags = [
+        "block-network",
+        "manual",
+    ],
+)
+
+sh_test(
+    name = "expected_failure_test",
+    srcs = ["expected_failure_test.sh"],
+    args = [
+        "$(rootpath :unexpected)",
+        "$(rootpath :stale)",
+        "$(rootpath :bad_expected)",
+        "$(rootpath :wrong_mutations)",
+        "$(rootpath :online_images)",
+    ],
+    data = [
+        ":bad_expected",
+        ":online_images",
+        ":stale",
+        ":unexpected",
+        ":wrong_mutations",
+    ],
+    tags = ["block-network"],
+)
+
+# CI: `bazel build //tests/apply:stale_check` must fail (a stale entry).
+kyverno_check(
+    name = "stale_check",
+    expected_findings = "stale.yaml",
+    policies = [":prod_team"],
+    resources = ["pods.yaml"],
+    tags = ["manual"],
+    values_file = "values.yaml",
+)

@@ -7,6 +7,12 @@ exports_files([
     "defs.bzl",
 ])
 
+# The pinned chart's render: `resource_filters = "@rules_kyverno//:kyverno_manifest"`
+# applies its default resourceFilters.
+alias(
+    name = "kyverno_manifest",
+    actual = "//private/manifests:kyverno.yaml",
+)
 
 bzl_library(
     name = "defs",

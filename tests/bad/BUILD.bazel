@@ -50,6 +50,7 @@ kyverno_policy_test(
     name = "good_policies_test",
     srcs = [
         "//tests/policies:add_team.yaml",
+        "//tests/policies:admission.yaml",
         "//tests/policies:exceptions.yaml",
         "//tests/policies:no_latest_cel.yaml",
         "//tests/policies:require_team.yaml",
@@ -62,4 +63,42 @@ kyverno_policy(
     name = "typo_top",
     srcs = ["typo_top.yaml"],
     tags = ["manual"],
+)
+
+# Kubernetes admission policies: CEL is compiled, bound or not (#1).
+kyverno_policy_test(
+    name = "vap_bad_cel_test",
+    srcs = ["vap_bad_cel.yaml"],
+    expect_error = "tests/bad/vap_bad_cel.yaml: Kyverno: ValidatingAdmissionPolicy vap-bad-cel: .*Syntax error",
+)
+
+kyverno_policy_test(
+    name = "map_bad_cel_test",
+    srcs = ["map_bad_cel.yaml"],
+    expect_error = "tests/bad/map_bad_cel.yaml: Kyverno: map-bad-cel: compilation failed: .*Syntax error",
+)
+
+# With several files, each load problem names its file (#2), and a CEL
+# compile error in one file doesn't hide the others' problems.
+[kyverno_policy_test(
+    name = name,
+    srcs = [
+        "//tests/policies:require_team.yaml",
+        "bad_cel.yaml",
+        "two_validations.yaml",
+        "vap_bad_cel.yaml",
+    ],
+    expect_error = expect,
+) for name, expect in [
+    ("names_file_skipped_test", "^  tests/bad/two_validations.yaml: Kyverno skipped: .*only one of"),
+    ("names_file_cel_test", "^  tests/bad/bad_cel.yaml: Kyverno: .*Syntax error"),
+    ("names_file_vap_test", "^  tests/bad/vap_bad_cel.yaml: Kyverno: ValidatingAdmissionPolicy"),
+]]
+
+# ImageValidatingPolicy: also needs the ConfigMap probe; compiled offline.
+kyverno_policy_test(
+    name = "ivp_bad_cel_test",
+    srcs = ["ivp_bad_cel.yaml"],
+    expect_error = "tests/bad/ivp_bad_cel.yaml: Kyverno: KyvernoImageValidatingPolicy ivp-bad-cel: failed to compile policy",
+    tags = ["block-network"],
 )

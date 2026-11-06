@@ -2,32 +2,34 @@
 
 kyverno_check is kyverno_apply_test as a validation action: `bazel build`
 fails if a resource violates a policy. Use it to keep generated manifests
-compliant. The policy report (JSON) is in the `kyverno` output group.
+compliant. The policy report (JSON) and the mutated resources are in the
+`kyverno` output group.
 
 kyverno_mutate writes the resources as the policies mutate them (one
 multi-document YAML file), e.g. to see or ship what admission would apply.
 """
 
 load(":common.bzl", "TOOLCHAIN", "label_text")
-load(":test.bzl", "APPLY_ATTRS", "apply_args")
+load(":test.bzl", "APPLY_ATTRS", "COMMON_ATTRS", "apply_args")
 
 def _kyverno_check_impl(ctx):
     k = ctx.toolchains[TOOLCHAIN].kyverno
     args, files = apply_args(ctx, False)
     report = ctx.actions.declare_file(ctx.label.name + ".kyverno.json")
+    mutated = ctx.actions.declare_file(ctx.label.name + ".mutated.yaml")
     ctx.actions.run_shell(
         command = 'exec python3 "$@"',
         arguments = [ctx.file._driver.path, "apply", "--kyverno", k.kyverno.path,
-                     "--json", report.path] + args,
+                     "--json", report.path, "--mutated", mutated.path] + args,
         inputs = files + [ctx.file._driver, k.kyverno],
-        outputs = [report],
+        outputs = [report, mutated],
         use_default_shell_env = True,
         mnemonic = "KyvernoCheck",
         progress_message = "Applying Kyverno policies to %{label}",
     )
     return [
         DefaultInfo(files = depset()),
-        OutputGroupInfo(_validation = depset([report]), kyverno = depset([report])),
+        OutputGroupInfo(_validation = depset([report]), kyverno = depset([report, mutated])),
     ]
 
 kyverno_check = rule(
@@ -57,6 +59,6 @@ def _kyverno_mutate_impl(ctx):
 kyverno_mutate = rule(
     implementation = _kyverno_mutate_impl,
     doc = "The resources as the policies mutate them, as one YAML file.",
-    attrs = dict(APPLY_ATTRS, out = attr.string(doc = "Output file name (default <name>.yaml).")),
+    attrs = dict(COMMON_ATTRS, out = attr.string(doc = "Output file name (default <name>.yaml).")),
     toolchains = [TOOLCHAIN],
 )

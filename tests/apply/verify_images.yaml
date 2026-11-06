@@ -1,0 +1,55 @@
+# Image verification: needs a registry as written.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: verify-acme
+spec:
+  validationFailureAction: Enforce
+  webhookTimeoutSeconds: 30
+  rules:
+    - name: signed
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+      verifyImages:
+        - imageReferences: ["registry.example/acme/*"]
+          mutateDigest: true
+          verifyDigest: true
+          required: true
+          attestors:
+            - entries:
+                - keys:
+                    publicKeys: |-
+                      -----BEGIN PUBLIC KEY-----
+                      MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE8nXRh950IZbRj8Ra/N9sbqOPZrfM
+                      5/KAQN0/KjHcorm/J5yctVd7iEcnessRQjU917hmKO6JWVGHpDguIyakZA==
+                      -----END PUBLIC KEY-----
+---
+apiVersion: policies.kyverno.io/v1
+kind: ImageValidatingPolicy
+metadata:
+  name: verify-acme-cel
+spec:
+  validationActions: [Deny]
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE]
+        resources: [pods]
+  matchImageReferences:
+    - glob: "registry.example/acme/*"
+  attestors:
+    - name: cosign
+      cosign:
+        key:
+          data: |
+            -----BEGIN PUBLIC KEY-----
+            MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE8nXRh950IZbRj8Ra/N9sbqOPZrfM
+            5/KAQN0/KjHcorm/J5yctVd7iEcnessRQjU917hmKO6JWVGHpDguIyakZA==
+            -----END PUBLIC KEY-----
+  validations:
+    - expression: >-
+        images.containers.map(image, verifyImageSignatures(image, [attestors.cosign])).all(e, e > 0)
+      message: failed signature verification

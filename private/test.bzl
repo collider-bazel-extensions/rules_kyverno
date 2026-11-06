@@ -71,7 +71,12 @@ kyverno_test = rule(
     toolchains = [TOOLCHAIN],
 )
 
+def _file_arg(ctx, name):
+    attr = getattr(ctx.attr, name, None)
+    return getattr(ctx.file, name) if attr else None
+
 def apply_args(ctx, runfiles):
+    """Driver arguments shared by apply and mutate, and their input files."""
     path = (lambda f: f.short_path) if runfiles else (lambda f: f.path)
     pols = policy_files(ctx.attr.policies)
     if not pols:
@@ -86,11 +91,20 @@ def apply_args(ctx, runfiles):
     exc = policy_files(ctx.attr.exceptions)
     for f in exc:
         args += ["--exception", path(f)]
-    if ctx.attr.audit_warn:
+    if getattr(ctx.attr, "audit_warn", False):
         args.append("--audit-warn")
-    return args, pols + exc + ctx.files.resources
+    if ctx.attr.offline_images:
+        args += ["--offline-images", ctx.attr.offline_images]
+    extra = []
+    for name in ("values_file", "resource_filters", "expected_findings", "expected_mutations"):
+        f = _file_arg(ctx, name)
+        if f:
+            args += ["--" + name.replace("_", "-"), path(f)]
+            extra.append(f)
+    return args, pols + exc + ctx.files.resources + extra
 
-APPLY_ATTRS = {
+# Attributes of kyverno_apply_test, kyverno_check and kyverno_mutate.
+COMMON_ATTRS = {
     "policies": attr.label_list(
         providers = [KyvernoPolicyInfo],
         mandatory = True,
@@ -104,17 +118,51 @@ APPLY_ATTRS = {
         providers = [KyvernoPolicyInfo],
         doc = "kyverno_policy targets holding extra PolicyExceptions.",
     ),
+    "values_file": attr.label(
+        allow_single_file = True,
+        doc = "A Kyverno CLI values file (`kind: Value`): namespace labels for " +
+              "namespaceSelector, policy and rule variables, globalValues.",
+    ),
+    "resource_filters": attr.label(
+        allow_single_file = True,
+        doc = "A file holding the Kyverno ConfigMap (alone or among other " +
+              "documents, e.g. a rendered chart). Resources its " +
+              "`resourceFilters` match are left out, as the admission " +
+              "controller skips them.",
+    ),
+    "offline_images": attr.string(
+        values = ["", "strip", "digest"],
+        doc = "Image verification needs a registry. `strip`: leave verifyImages " +
+              "rules and ImageValidatingPolicies out. `digest`: keep only the " +
+              "check that matching images are pinned by digest. Empty (default): " +
+              "as written (needs network).",
+    ),
     "audit_warn": attr.bool(
         doc = "Report Audit-mode policies' failures as warnings instead of failures.",
     ),
     "_driver": attr.label(default = "//private:kyverno.py", allow_single_file = True),
 }
 
+APPLY_ATTRS = dict(
+    COMMON_ATTRS,
+    expected_findings = attr.label(
+        allow_single_file = [".yaml", ".yml", ".json"],
+        doc = "Reviewed known findings: a YAML list of {policy, rule (optional), " +
+              "resource (Kind/namespace/name), reason}. Listed findings don't " +
+              "fail; an entry that matches nothing does.",
+    ),
+    expected_mutations = attr.label(
+        allow_single_file = True,
+        doc = "The resources as the policies should mutate them (YAML). Fails " +
+              "on any difference, compared as data.",
+    ),
+)
+
 def _kyverno_apply_test_impl(ctx):
     k = ctx.toolchains[TOOLCHAIN].kyverno
     args, files = apply_args(ctx, True)
     wrapper = _wrapper(ctx, "apply", ["--kyverno", k.kyverno.short_path] + args,
-                       ['reports+=(--json "$out/kyverno-report.json")'])
+                       ['reports+=(--json "$out/kyverno-report.json" --mutated "$out/kyverno-mutated.yaml")'])
     return [DefaultInfo(executable = wrapper, runfiles = ctx.runfiles(
         files = [wrapper, ctx.file._driver, k.kyverno] + files,
     ))]
@@ -122,8 +170,9 @@ def _kyverno_apply_test_impl(ctx):
 kyverno_apply_test = rule(
     implementation = _kyverno_apply_test_impl,
     test = True,
-    doc = "Fails if any resource fails (or errors on) any policy. JUnit to " +
-          "Bazel; the policy report (JSON) to the test's undeclared outputs.",
+    doc = "Fails if any resource fails (or errors on) any policy, other than " +
+          "expected findings. JUnit to Bazel; the policy report (JSON) and " +
+          "the mutated resources to the test's undeclared outputs.",
     attrs = dict(APPLY_ATTRS, _tmpl = attr.label(default = "//private:run.sh.tmpl", allow_single_file = True)),
     toolchains = [TOOLCHAIN],
 )
