@@ -33,6 +33,15 @@ def _validation_impl(ctx):
 
 _validation_test = analysistest.make(_validation_impl)
 
+def _check_outputs_impl(ctx):
+    env = analysistest.begin(ctx)
+    groups = analysistest.target_under_test(env)[OutputGroupInfo]
+    asserts.equals(env, ["rendered_check.kyverno.json", "rendered_check.mutated.yaml"],
+                   sorted([f.basename for f in groups.kyverno.to_list()]))
+    return analysistest.end(env)
+
+_check_outputs_test = analysistest.make(_check_outputs_impl)
+
 def _has_executable_impl(ctx):
     env = analysistest.begin(ctx)
     target = analysistest.target_under_test(env)
@@ -65,6 +74,7 @@ def analysis_test_suite(name):
         "_policy_info": (_policy_info_test, "//tests/policies:all", None),
         "_policy_validation": (_validation_test, "//tests/policies:team", None),
         "_check_validation": (_validation_test, ":rendered_check", None),
+        "_check_outputs": (_check_outputs_test, ":rendered_check", None),
         "_install_executable": (_has_executable_test, ":" + s + "_install", None),
         "_policy_health_executable": (_has_executable_test, ":" + s + "_policy_health", None),
         "_empty_policy": (_fails_test, ":" + s + "_empty_policy", "srcs is empty"),

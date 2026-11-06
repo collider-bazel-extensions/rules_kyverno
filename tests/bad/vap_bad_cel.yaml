@@ -1,0 +1,14 @@
+# A ValidatingAdmissionPolicy with a CEL syntax error, and no binding.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: vap-bad-cel
+spec:
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["apps"]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["deployments"]
+  validations:
+    - expression: "object.spec.replicas <= (5"

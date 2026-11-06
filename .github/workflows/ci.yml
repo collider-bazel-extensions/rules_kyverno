@@ -38,6 +38,7 @@ jobs:
           }
           expect_fail "unknown field 'validationFailureActon' (did you mean 'validationFailureAction'?)" //tests/bad:typo_top
           expect_fail "Pod/shop/unlabelled  (tests/suite/pods.yaml)" //tests:violations_check
+          expect_fail "stale expected finding (matches nothing): prod-needs-team  Pod/dev/*" //tests/apply:stale_check
 
       - name: Committed manifest matches the render
         run: |

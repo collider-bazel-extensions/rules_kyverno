@@ -1,0 +1,9 @@
+# Namespace labels for namespaceSelector.
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Value
+metadata: {name: values}
+namespaceSelector:
+  - name: shop
+    labels: {env: prod}
+  - name: dev
+    labels: {env: dev}

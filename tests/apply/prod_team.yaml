@@ -1,0 +1,22 @@
+# Pods in prod namespaces need a team label. Offline, namespace labels come
+# from a values file.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: prod-needs-team
+spec:
+  validationFailureAction: Enforce
+  rules:
+    - name: team
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaceSelector:
+                matchLabels: {env: prod}
+      validate:
+        message: "pods in prod need a team label"
+        pattern:
+          metadata:
+            labels:
+              team: "?*"

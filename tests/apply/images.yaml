@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Pod
+metadata: {name: pinned, namespace: shop, labels: {team: payments}}
+spec:
+  containers:
+    - name: app
+      image: "registry.example/acme/app@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: other-registry, namespace: shop, labels: {team: payments}}
+spec: {containers: [{name: app, image: "registry.example/third-party/db:16"}]}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: by-tag, namespace: shop, labels: {team: payments}}
+spec:
+  selector: {matchLabels: {app: by-tag}}
+  template:
+    metadata: {labels: {app: by-tag, team: payments}}
+    spec: {containers: [{name: app, image: "registry.example/acme/app:1.4"}]}

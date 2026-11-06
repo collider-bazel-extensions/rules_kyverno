@@ -21,12 +21,19 @@ converted to JSON by the pinned CLI itself (`kyverno jp query -i FILE @`).
 
   kyverno.py apply --kyverno BIN --label L [--runfiles] --policy F...
                    --resource F... [--exception F...] [--audit-warn]
+                   [--values-file F] [--resource-filters F]
+                   [--offline-images strip|digest] [--expected-findings F]
+                   [--expected-mutations F] [--mutated OUT]
                    [--json OUT] [--junit OUT] [--marker OUT]
       kyverno_apply_test / kyverno_check: every resource must pass every
-      policy (fail or error results fail; warn and skip are reported).
+      policy (fail or error results fail; warn and skip are reported),
+      except findings listed in --expected-findings; a listed finding that
+      no longer occurs fails. --expected-mutations: the mutated resources
+      must equal these.
 
   kyverno.py mutate --kyverno BIN --label L --policy F... --resource F...
-                    --out OUT
+                    [--values-file F] [--resource-filters F]
+                    [--offline-images strip|digest] --out OUT
       kyverno_mutate: the resources as the policies mutate them.
 
   kyverno.py test --kyverno BIN --label L [--runfiles] [--junit OUT] TEST_FILE...
@@ -66,6 +73,10 @@ RULE_KINDS = {
     "ValidatingAdmissionPolicy", "MutatingAdmissionPolicy",
 }
 EXCEPTION_KINDS = {"PolicyException"}
+# Kubernetes admission policies (evaluated by the API server; the CLI loads
+# them too) and their bindings.
+ADMISSION_KINDS = {"ValidatingAdmissionPolicy", "MutatingAdmissionPolicy"}
+BINDING_KINDS = {k + "Binding" for k in ADMISSION_KINDS}
 # Kubernetes kinds Kyverno accepts that no Kyverno CRD describes: checked by
 # the CLI load only.
 NO_SCHEMA = {
@@ -83,6 +94,17 @@ kind: LoadProbe
 metadata:
   name: rules-kyverno-load-probe
   namespace: default
+"""
+
+
+# The CLI maps an admission policy's resource to a GVR before it evaluates
+# it, so their probe must be a core kind (#1).
+_ADMISSION_PROBE = """\
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rules-kyverno-load-probe
+  namespace: rules-kyverno-load-probe
 """
 
 
@@ -260,14 +282,14 @@ def validate(value, schema, path, errs):
 def cmd_check(args):
     with open(args.schemas) as f:
         schemas = json.load(f)
-    problems, index, rule_files = [], [], []
+    problems, index, groups = [], [], []
     with tempfile.TemporaryDirectory() as tmp:
         for path in args.files:
             docs = split_docs(open(path).read())
             if not docs:
                 problems.append(f"{path}: no YAML documents")
                 continue
-            has_rules = False
+            rules, admission = [], []
             for line, text in docs:
                 where = f"{path}:{line}"
                 try:
@@ -295,11 +317,14 @@ def cmd_check(args):
                     problems.append(f"{where}: metadata.name is required")
                 index.append({"apiVersion": obj["apiVersion"], "kind": obj["kind"],
                               "name": name, "namespace": meta.get("namespace", "")})
-                has_rules |= obj["kind"] in RULE_KINDS
-            if has_rules:
-                rule_files.append(path)
-        if not problems and rule_files:
-            problems += _load(args.kyverno, rule_files, tmp)
+                if obj["kind"] in ADMISSION_KINDS | IMAGE_KINDS:
+                    admission.append(obj)
+                elif obj["kind"] in RULE_KINDS:
+                    rules.append(text)
+            if rules or admission:
+                groups.append((path, rules, admission))
+        if not problems and groups:
+            problems += _load(args.kyverno, groups, tmp)
     if problems:
         _log(f"kyverno_policy {args.label}:\n" + "\n".join("  " + p for p in problems))
         return 1
@@ -310,49 +335,391 @@ def cmd_check(args):
     return 0
 
 
-def _load(kyverno, files, tmp):
-    """The CLI loads the policies: apply them to a resource none matches."""
-    probe = os.path.join(tmp, "probe.yaml")
-    with open(probe, "w") as f:
-        f.write(_PROBE)
-    r = _run([kyverno, "apply", *files, "--resource", probe, "--remove-color"])
-    out = r.stdout + "\n" + r.stderr
+def _load(kyverno, groups, tmp):
+    """The CLI loads the policies. One run for all files; if it finds
+    problems, one run per file, so each problem names its file (#2). A CEL
+    compile error also stops the CLI, hiding the other files' problems."""
+    problems = _load_run(kyverno, groups, tmp)
+    if not problems:
+        return []
+    if len(groups) == 1:
+        return [f"{groups[0][0]}: {p}" for p in problems]
+    per_file = []
+    for g in groups:
+        per_file += [f"{g[0]}: {p}" for p in _load_run(kyverno, [g], tmp)]
+    # Nothing fails on its own: the files conflict with each other.
+    return per_file or problems
+
+
+def _load_run(kyverno, groups, tmp):
+    """Problems loading the rule-bearing documents of `groups` [(path, rule
+    texts, objects for the ConfigMap probe)]: most Kyverno kinds against a
+    resource none matches; Kubernetes admission policies and
+    ImageValidatingPolicies against a ConfigMap (see _load_admission)."""
     problems = []
-    if "Policies Skipped" in out:
-        block = out.split("Policies Skipped:", 1)[1].split("-" * 10, 1)[0]
-        problems += ["Kyverno skipped: " + l.strip() for l in block.splitlines() if l.strip()]
-    errors = [l.strip() for l in out.splitlines() if re.match(r"\s*(ERROR|Error)\b", l)]
-    problems += [f"Kyverno: {l}" for l in errors]
+    rules = [t for _, ts, _ in groups for t in ts]
+    if rules:
+        problems += _load_kyverno(kyverno, rules, tmp)
+    admission = [o for _, _, os_ in groups for o in os_]
+    if admission:
+        problems += _load_admission(kyverno, admission, tmp)
+    return problems
+
+
+def _write(tmp, name, text):
+    path = os.path.join(tmp, name)
+    with open(path, "w") as f:
+        f.write(text)
+    return path
+
+
+def _join(docs):
+    return "\n---\n".join(d.rstrip("\n") for d in docs) + "\n"
+
+
+def _load_kyverno(kyverno, texts, tmp):
+    pols = _write(tmp, "load-policies.yaml", _join(texts))
+    probe = _write(tmp, "probe.yaml", _PROBE)
+    r = _run([kyverno, "apply", pols, "--resource", probe, "--remove-color"])
+    out = r.stdout + "\n" + r.stderr
+    problems = _skipped(out) + _error_lines(out)
     m = re.search(r"error: (\d+)", out)
     if not problems and m and int(m.group(1)):
         problems.append("Kyverno reported errors loading the policies:\n" + out.strip()[-1500:])
     return problems
 
 
+def _skipped(out):
+    if "Policies Skipped" not in out:
+        return []
+    block = out.split("Policies Skipped:", 1)[1].split("-" * 10, 1)[0]
+    return ["Kyverno skipped: " + l.strip() for l in block.splitlines() if l.strip()]
+
+
+def _error_lines(out):
+    return [f"Kyverno: {l.strip()}" for l in out.splitlines() if re.match(r"\s*(ERROR|Error)\b", l)]
+
+
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+_ERR_LOG = re.compile(r'\bERR\b.*?error="((?:[^"\\]|\\.)*)".*?\bpolicy=(\S+)')
+
+
+def _load_admission(kyverno, objs, tmp):
+    """Kinds the CLI maps to a GVR before evaluating them, against a
+    ConfigMap; only compile errors count, since evaluating a policy against
+    the probe can fail.
+    - ValidatingAdmissionPolicy / MutatingAdmissionPolicy: the CLI compiles
+      one only when a binding selects it, and then evaluates it against any
+      resource, ignoring its matchConstraints. So every policy gets a
+      binding of its own (the files' bindings are left out: their selectors
+      could keep the probe out). MutatingAdmissionPolicy compile errors
+      appear only in the CLI's log (-v 1).
+    - ImageValidatingPolicy: compiled only once it matches, so the staged
+      copy matches ConfigMaps. With no images in the probe, nothing is
+      fetched."""
+    docs = []
+    for o in objs:
+        name = (o.get("metadata") or {}).get("name", "")
+        if o["kind"] in IMAGE_KINDS:
+            o = json.loads(json.dumps(o))
+            o["spec"]["matchConstraints"] = {"resourceRules": [{
+                "apiGroups": [""], "apiVersions": ["v1"], "operations": ["CREATE", "UPDATE"],
+                "resources": ["configmaps"]}]}
+            docs.append(json.dumps(o))
+            continue
+        spec = {"policyName": name}
+        if o["kind"] == "ValidatingAdmissionPolicy":
+            spec["validationActions"] = ["Audit"]
+        docs += [json.dumps(o), json.dumps({
+            "apiVersion": o["apiVersion"], "kind": o["kind"] + "Binding",
+            "metadata": {"name": "rules-kyverno-load-" + name}, "spec": spec})]
+    pols = _write(tmp, "load-admission.yaml", _join(docs))
+    probe = _write(tmp, "admission-probe.yaml", _ADMISSION_PROBE)
+    r = _run([kyverno, "apply", pols, "--resource", probe, "--remove-color", "-v", "1",
+              "--policy-report", "--output-format", "json"])
+    err = _ANSI.sub("", r.stderr)
+    problems = _skipped(r.stdout) + _error_lines(r.stdout + "\n" + err)
+    seen = set()
+    for res in (_report(r.stdout) or {}).get("results") or []:
+        msg = res.get("message") or ""
+        if res.get("result") == "error" and "compil" in msg:
+            seen.add(res.get("policy"))
+            problems.append(f"Kyverno: {res.get('source')} {res.get('policy')}: {msg.strip()}")
+    for m in _ERR_LOG.finditer(err):
+        msg, policy = re.sub(r'\\(.)', lambda e: "\n" if e.group(1) == "n" else e.group(1), m.group(1)), m.group(2)
+        if "compil" in msg and policy not in seen:
+            seen.add(policy)
+            problems.append(f"Kyverno: {policy}: {msg.strip()}")
+    if _report(r.stdout) is None and not problems:
+        problems.append(f"kyverno apply failed (exit {r.returncode}):\n"
+                        + (err.strip() or r.stdout.strip())[-1500:])
+    return problems
+
+
 # ---- apply / mutate -----------------------------------------------------------------------
 
 
-def _stage_policies(paths, tmp):
+def _stage_policies(paths, tmp, kyverno=None, offline_images=None):
     """Split policy files into what `kyverno apply` evaluates (RULE_KINDS)
     and exceptions. Other kinds (cleanup and deleting policies, global
     context entries) act in a cluster, not on a resource: `apply` would
-    report them as failing ("resource did not match"), so they're left out."""
-    pol, exc = [], []
+    report them as failing ("resource did not match"), so they're left out.
+    With offline_images, image verification is rewritten first (see
+    _offline). Returns ({"policies.yaml"|"exceptions.yaml": path}, notes)."""
+    pol, exc, notes = [], [], []
     for path in paths:
         for _, text in split_docs(open(path).read()):
             kind = doc_kind(text)
             if kind in EXCEPTION_KINDS:
                 exc.append(text)
             elif kind in RULE_KINDS:
-                pol.append(text)
+                if offline_images and kind in IMAGE_KINDS | {"ClusterPolicy", "Policy"} \
+                        and (kind in IMAGE_KINDS or "verifyImages" in text):
+                    obj, note = _offline(to_json(kyverno, text, tmp), offline_images)
+                    if note:
+                        notes.append(f"{path}: {note}")
+                    if obj is not None:
+                        pol.append(json.dumps(obj))
+                else:
+                    pol.append(text)
     files = {}
     for name, docs in (("policies.yaml", pol), ("exceptions.yaml", exc)):
         if docs:
-            p = os.path.join(tmp, name)
-            with open(p, "w") as f:
-                f.write("\n---\n".join(d.rstrip("\n") for d in docs) + "\n")
-            files[name] = p
-    return files
+            files[name] = _write(tmp, name, _join(docs))
+    return files, notes
+
+
+# ---- offline image verification ---------------------------------------------------
+
+IMAGE_KINDS = {"ImageValidatingPolicy", "NamespacedImageValidatingPolicy"}
+
+
+def _offline(obj, mode):
+    """Image verification needs a registry: signatures, attestations, and a
+    tag's digest. `strip` removes it; `digest` keeps only the check that
+    matching images are pinned by digest, which needs no network. Returns
+    (policy or None if nothing is left, note)."""
+    kind, name = obj["kind"], (obj.get("metadata") or {}).get("name", "?")
+    spec = obj.get("spec") or {}
+    if kind in IMAGE_KINDS:
+        if mode == "strip" or not (spec.get("validationConfigurations") or {}).get("verifyDigest", True):
+            return None, f"{kind} {name} left out (offline_images = {mode!r})"
+        return _ivp_digest(obj), (f"{kind} {name}: custom image extractors (spec.images) not checked"
+                                  if spec.get("images") else None)
+    rules = []
+    for rule in spec.get("rules") or []:
+        entries = rule.pop("verifyImages", None)
+        if entries is not None and mode == "digest":
+            kept = []
+            for e in entries:
+                if not e.get("verifyDigest", True):
+                    continue
+                refs = e.get("imageReferences") or ([e["image"]] if e.get("image") else [])
+                kept.append({k: v for k, v in (("imageReferences", refs),
+                             ("skipImageReferences", e.get("skipImageReferences")),
+                             ("verifyDigest", True), ("mutateDigest", False), ("required", False)) if v is not None})
+            if kept:
+                rule["verifyImages"] = kept
+        if any(k in rule for k in ("validate", "mutate", "generate", "verifyImages")):
+            rules.append(rule)
+    if not rules:
+        return None, f"{kind} {name} left out: no rules left (offline_images = {mode!r})"
+    spec["rules"] = rules
+    return obj, None
+
+
+def _glob_re(glob):
+    return "^" + re.escape(glob).replace("\\*", ".*").replace("\\?", ".") + "$"
+
+
+def _ivp_digest(obj):
+    """An ImageValidatingPolicy as a ValidatingPolicy that only checks that
+    the images it matches carry a digest. The CLI fetches every matched
+    image, even with no attestors, so the IVP itself can't run offline. Pod
+    specs are found in Pods, workloads and CronJobs alike; with autogen,
+    Kyverno's rewrite of `object.spec` lands on the right branch too."""
+    spec = obj["spec"]
+    match = []
+    for ref in spec.get("matchImageReferences") or []:
+        if ref.get("glob"):
+            match.append(f"i.matches({json.dumps(_glob_re(ref['glob']))})")
+        elif ref.get("expression"):
+            match.append(f"cel.bind(ref, i, ({ref['expression']}))")
+    pod = "variables.rulesKyvernoPodSpec"
+    out = {k: spec[k] for k in ("validationActions", "matchConstraints", "matchConditions",
+                                "failurePolicy", "autogen") if k in spec}
+    out["variables"] = [
+        {"name": "rulesKyvernoPodSpec", "expression":
+            "has(object.spec.template) ? object.spec.template.spec : "
+            "(has(object.spec.jobTemplate) ? object.spec.jobTemplate.spec.template.spec : object.spec)"},
+        {"name": "rulesKyvernoUnpinned", "expression":
+            f"({pod}.?containers.orValue([]) + {pod}.?initContainers.orValue([]) + "
+            f"{pod}.?ephemeralContainers.orValue([])).map(c, c.image)"
+            f".filter(i, !i.contains('@') && ({' || '.join(match) or 'true'}))"},
+    ]
+    out["validations"] = [{
+        "expression": "size(variables.rulesKyvernoUnpinned) == 0",
+        "messageExpression": "'images must be pinned by digest: ' + variables.rulesKyvernoUnpinned.join(', ')",
+    }]
+    return {"apiVersion": obj["apiVersion"], "kind": obj["kind"].replace("ImageValidating", "Validating"),
+            "metadata": obj["metadata"], "spec": out}
+
+
+# ---- several documents at once ------------------------------------------------------
+
+
+def docs_to_json(kyverno, docs, tmp):
+    """YAML documents → Python values with one CLI call: the documents become
+    the items of one YAML sequence."""
+    if not docs:
+        return []
+    items = []
+    for d in docs:
+        lines = [l for l in d.splitlines() if not l.startswith("%")]
+        while lines and (not lines[0].strip() or lines[0].lstrip().startswith("#")):
+            lines.pop(0)
+        items.append("- " + "\n  ".join(lines))
+    out = to_json(kyverno, "\n".join(items) + "\n", tmp)
+    if not isinstance(out, list) or len(out) != len(docs):
+        raise Failed("could not read the documents")
+    return out
+
+
+# ---- resourceFilters ----------------------------------------------------------------
+
+
+def _wild(pat, s):
+    return re.fullmatch(re.escape(pat).replace("\\*", ".*").replace("\\?", "."), s) is not None
+
+
+def _parse_filters(kyverno, path, tmp):
+    """`resourceFilters` of the Kyverno ConfigMap in `path` (a file that may
+    hold other documents too, e.g. a rendered chart): the one named
+    `kyverno`, or the only one with resourceFilters."""
+    found = []
+    for _, doc in split_docs(open(path).read()):
+        if doc_kind(doc) == "ConfigMap" and "resourceFilters" in doc:
+            obj = to_json(kyverno, doc, tmp)
+            rf = (obj.get("data") or {}).get("resourceFilters")
+            if rf is not None:
+                found.append(((obj.get("metadata") or {}).get("name"), rf))
+    named = [rf for n, rf in found if n == "kyverno"]
+    if len(found) != 1 and len(named) != 1:
+        raise Failed(f"{path}: no single Kyverno ConfigMap with data.resourceFilters "
+                     f"(found {len(found)}; name it 'kyverno')")
+    filters = []
+    for f in re.findall(r"\[([^\]]*)\]", named[0] if len(named) == 1 else found[0][1]):
+        parts = [x.strip() for x in f.split(",")]
+        if len(parts) != 3:
+            raise Failed(f"{path}: resourceFilters entry [{f}]: want [Kind,Namespace,Name]")
+        k = parts[0].split("/")
+        g, v, sub = "*", "*", ""
+        if len(k) == 2:
+            if k[0][:1].isupper():
+                kind, sub = k
+            else:
+                v, kind = k
+        elif len(k) == 3:
+            if k[1][:1].isupper():
+                v, kind, sub = k
+            else:
+                g, v, kind = k
+        elif len(k) == 4:
+            g, v, kind, sub = k
+        else:
+            kind = k[0]
+        filters.append((g, v, kind, sub, parts[1], parts[2]))
+    return filters
+
+
+def _filtered(obj, filters):
+    """Whether a resource matches a filter (the admission controller skips
+    it). Manifests have no subresource; a missing namespace is ''."""
+    api = obj.get("apiVersion") or ""
+    g, v = api.rsplit("/", 1) if "/" in api else ("", api)
+    meta = obj.get("metadata") or {}
+    return any(_wild(fg, g) and _wild(fv, v) and _wild(fk, obj.get("kind") or "") and _wild(fs, "")
+               and _wild(fn, meta.get("namespace") or "") and _wild(fm, meta.get("name") or "")
+               for fg, fv, fk, fs, fn, fm in filters)
+
+
+def _apply_filters(kyverno, resources, filters, tmp):
+    """Copies of the resource files without the filtered documents.
+    Returns (files, number of documents left out)."""
+    out, skipped = [], 0
+    for i, path in enumerate(resources):
+        docs = [d for _, d in split_docs(open(path).read())]
+        try:
+            objs = docs_to_json(kyverno, docs, tmp)
+        except Failed as e:
+            raise Failed(f"{path}: {e}")
+        keep = [d for d, o in zip(docs, objs) if not (isinstance(o, dict) and _filtered(o, filters))]
+        skipped += len(docs) - len(keep)
+        if keep:
+            d = os.path.join(tmp, "filtered", str(i))
+            os.makedirs(d, exist_ok=True)
+            out.append(_write(d, os.path.basename(path), _join(keep)))
+    return out, skipped
+
+
+# ---- expected findings --------------------------------------------------------------
+
+_EXPECTED_KEYS = {"policy", "rule", "resource", "reason"}
+
+
+def _expected(kyverno, path, tmp, shown):
+    """The reviewed list of known findings: a YAML list of {policy, rule
+    (optional), resource (Kind/namespace/name, as the failures print it),
+    reason}. `*` and `?` match any characters."""
+    docs = split_docs(open(path).read())
+    entries = to_json(kyverno, docs[0][1], tmp) if docs else []
+    if not isinstance(entries, list):
+        raise Failed(f"{shown}: want a YAML list of {{policy, rule, resource, reason}}")
+    problems = []
+    for i, e in enumerate(entries):
+        where = f"{shown}: entry {i + 1}"
+        if not isinstance(e, dict):
+            problems.append(f"{where}: not a mapping")
+            continue
+        extra = sorted(set(e) - _EXPECTED_KEYS)
+        if extra:
+            problems.append(f"{where}: unknown field(s) {', '.join(extra)} "
+                            f"(fields: policy, rule, resource, reason)")
+        for k in ("policy", "resource", "reason"):
+            if not isinstance(e.get(k), str) or not e[k].strip():
+                problems.append(f"{where}: {k} is required")
+    if problems:
+        raise Failed("\n".join(problems))
+    return entries
+
+
+def _matches(entry, policy, rule, ref):
+    return (_wild(entry["policy"], policy or "") and _wild(entry["resource"], ref)
+            and ("rule" not in entry or _wild(str(entry["rule"]), rule or "")))
+
+
+# ---- mutated output -----------------------------------------------------------------
+
+
+def _clean_mutated(path):
+    """The CLI's -o output without the empty documents it writes."""
+    if not os.path.exists(path):
+        return ""
+    docs = [d for _, d in split_docs(open(path).read())]
+    return "---\n".join(d if d.endswith("\n") else d + "\n" for d in docs)
+
+
+def _mutation_diff(kyverno, got_text, want_path, tmp, shown):
+    """Differences between the mutated resources and the expected ones,
+    compared as data (formatting and key order don't count)."""
+    def canon(text):
+        return [json.dumps(o, indent=2, sort_keys=True).splitlines()
+                for o in docs_to_json(kyverno, [d for _, d in split_docs(text)], tmp)]
+    got, want = canon(got_text), canon(open(want_path).read())
+    if got == want:
+        return []
+    flat = lambda ds: [l for i, d in enumerate(ds) for l in [f"--- document {i + 1}"] + d]
+    return list(difflib.unified_diff(flat(want), flat(got), shown, "mutated", lineterm="", n=2))
 
 
 def _resource_files(paths):
@@ -368,6 +735,7 @@ def _resource_files(paths):
 
 
 _NAME = re.compile(r"^metadata:\s*\n(?:[ \t]+.*\n)*?[ \t]+name:\s*['\"]?([^\s'\"#]+)", re.M)
+_FLOW_NAME = re.compile(r"^metadata:\s*\{[^}]*?\bname:\s*['\"]?([^\s'\",}#]+)", re.M)
 _NS = re.compile(r"^metadata:\s*\n(?:[ \t]+.*\n)*?[ \t]+namespace:\s*['\"]?([^\s'\"#]+)", re.M)
 
 
@@ -380,14 +748,16 @@ def _origins(files, labels):
         except OSError:
             continue
         for _, doc in split_docs(text):
-            k, n = doc_kind(doc), _NAME.search(doc + "\n")
+            k, n = doc_kind(doc), _NAME.search(doc + "\n") or _FLOW_NAME.search(doc)
             if k and n:
                 out.setdefault((k, n.group(1)), label)
     return out
 
 
 def _report(stdout):
-    i = stdout.find("{")
+    i = stdout.find('{"kind"')
+    if i < 0:
+        i = stdout.find("{")
     if i < 0:
         return None
     try:
@@ -411,35 +781,80 @@ def _junit(path, suite, cases):
         f.write("\n".join(out) + "\n")
 
 
-def cmd_apply(args):
-    policies = [_resolve(p, args.runfiles) for p in args.policy]
-    labels = list(args.resource)
-    resources = _resource_files([_resolve(p, args.runfiles) for p in args.resource])
+_REGISTRY_HINT = re.compile(r"GET https?://|dial tcp|failed to fetch image|lookup .* on ")
+
+
+def _stage(args, tmp):
+    """Policies, exceptions and resource files for apply and mutate, with
+    offline_images and resource filters applied. Returns (staged, resources,
+    files, notes) or raises Failed: `resources` are the given files (for
+    messages), `files` what the CLI reads."""
+    res = lambda ps: [_resolve(p, args.runfiles) for p in ps]
+    staged, notes = _stage_policies(res(args.policy + args.exception), tmp,
+                                    args.kyverno, args.offline_images)
+    if "policies.yaml" not in staged:
+        raise Failed("no policies" + (" left: " + "; ".join(notes) if notes else ""))
+    resources = _resource_files(res(args.resource))
     if not resources:
-        _log(f"kyverno {args.label}: no resource files to check")
-        return 2
+        raise Failed("no resource files to check")
+    files = resources
+    if args.resource_filters:
+        filters = _parse_filters(args.kyverno, _resolve(args.resource_filters, args.runfiles), tmp)
+        files, skipped = _apply_filters(args.kyverno, resources, filters, tmp)
+        notes.append(f"resourceFilters left out {skipped} document(s)")
+        if not files:
+            raise Failed("resourceFilters left no resources")
+    return staged, resources, files, notes
+
+
+def _apply_cmd(args, staged, files):
+    cmd = [args.kyverno, "apply", staged["policies.yaml"], "--remove-color"]
+    for r in files:
+        cmd += ["--resource", r]
+    if "exceptions.yaml" in staged:
+        cmd += ["--exception", staged["exceptions.yaml"]]
+    if args.values_file:
+        cmd += ["--values-file", _resolve(args.values_file, args.runfiles)]
+    return cmd
+
+
+def cmd_apply(args):
     with tempfile.TemporaryDirectory() as tmp:
-        staged = _stage_policies(policies + [_resolve(p, args.runfiles) for p in args.exception], tmp)
-        if "policies.yaml" not in staged:
-            _log(f"kyverno {args.label}: no policies")
+        try:
+            staged, resources, files, notes = _stage(args, tmp)
+            expected = _expected(args.kyverno, _resolve(args.expected_findings, args.runfiles), tmp,
+                                 args.expected_findings) \
+                if args.expected_findings else []
+        except Failed as e:
+            _log(f"kyverno {args.label}: {e}")
             return 2
-        cmd = [args.kyverno, "apply", staged["policies.yaml"], "--remove-color",
-               "--policy-report", "--output-format", "json"]
-        for r in resources:
-            cmd += ["--resource", r]
-        if "exceptions.yaml" in staged:
-            cmd += ["--exception", staged["exceptions.yaml"]]
+        mutated = os.path.join(tmp, "mutated.yaml")
+        cmd = _apply_cmd(args, staged, files) + ["--policy-report", "--output-format", "json", "-o", mutated]
         if args.audit_warn:
             cmd.append("--audit-warn")
         r = _run(cmd)
-    report = _report(r.stdout)
-    if report is None:
-        _log(f"kyverno {args.label}: kyverno apply failed (exit {r.returncode}):\n"
-             + (r.stderr.strip() or r.stdout.strip())[-3000:])
-        return 2
+        report = _report(r.stdout)
+        if report is None:
+            _log(f"kyverno {args.label}: kyverno apply failed (exit {r.returncode}):\n"
+                 + (r.stderr.strip() or r.stdout.strip())[-3000:])
+            return 2
+        mutated_text = _clean_mutated(mutated)
+        mutation_diff = []
+        if args.expected_mutations:
+            try:
+                mutation_diff = _mutation_diff(args.kyverno, mutated_text,
+                                               _resolve(args.expected_mutations, args.runfiles), tmp,
+                                               args.expected_mutations)
+            except Failed as e:
+                mutation_diff = [f"could not compare the mutated resources: {e}"]
+    if args.mutated:
+        with open(args.mutated, "w") as f:
+            f.write(mutated_text)
     rel = [os.path.relpath(f, _resolve(".", args.runfiles)) if args.runfiles else f for f in resources]
     origin = _origins(resources, rel)
-    bad, warn, cases = [], [], []
+    bad, warn, known, cases = [], [], [], []
+    used = [False] * len(expected)
+    registry = False
     for res in report.get("results") or []:
         result = res.get("result")
         rule = f"{res.get('policy')}" + (f"/{res['rule']}" if res.get("rule") else "")
@@ -448,24 +863,60 @@ def cmd_apply(args):
             ref = "/".join(x for x in (obj.get("kind"), obj.get("namespace"), obj.get("name")) if x)
             src = origin.get((obj.get("kind"), obj.get("name")))
             line = f"{result:<5} {rule}  {ref}" + (f"  ({src})" if src else "") + (f": {msg}" if msg else "")
+            hit = None
+            if result in ("fail", "error"):
+                hit = next((i for i, e in enumerate(expected)
+                            if _matches(e, res.get("policy"), res.get("rule"), ref)), None)
+            if hit is not None:
+                used[hit] = True
+                known.append(f"{line}\n      expected: {expected[hit]['reason']}")
+                cases.append((f"{rule} {ref}", None))
+                continue
             if result in ("fail", "error"):
                 bad.append(line)
+                registry |= bool(_REGISTRY_HINT.search(msg))
             elif result == "warn":
                 warn.append(line)
             cases.append((f"{rule} {ref}", line if result in ("fail", "error") else None))
+    for e, u in zip(expected, used):
+        if not u:
+            line = (f"stale expected finding (matches nothing): {e['policy']}"
+                    + (f"/{e['rule']}" if e.get("rule") else "") + f"  {e['resource']}"
+                    + f"  ({args.expected_findings}): {e['reason']}")
+            bad.append(line)
+            cases.append((f"expected {e['policy']} {e['resource']}", line))
+    if mutation_diff:
+        line = "mutated resources differ from " + str(args.expected_mutations) + ":\n" + \
+               "\n".join("    " + l for l in mutation_diff[:300])
+        bad.append(line)
+        cases.append(("expected mutations", line))
+    elif args.expected_mutations:
+        cases.append(("expected mutations", None))
     summary = report.get("summary") or {}
     head = (f"kyverno {args.label}: " + ", ".join(f"{k} {summary.get(k, 0)}" for k in
-            ("pass", "fail", "warn", "error", "skip")) + f" ({len(resources)} resource files)")
+            ("pass", "fail", "warn", "error", "skip")) + f" ({len(resources)} resource files)"
+            + (f"; {len(known)} expected" if expected else ""))
     if args.json:
         with open(args.json, "w") as f:
             json.dump(report, f, indent=1)
     if args.junit:
         _junit(args.junit, f"kyverno {args.label}", cases or [("no policy applied", None)])
+    for n in notes:
+        _log(f"note: {n}")
+    block = [head]
     if warn:
-        _log(head + "\nwarnings:\n" + "\n".join("  " + w for w in warn))
+        block += ["warnings:"] + ["  " + w for w in warn]
+    if known:
+        block += ["expected findings:"] + ["  " + k for k in known]
     if bad:
-        _log(head + "\n" + "\n".join("  " + b for b in bad))
+        block += (["failures:"] if warn or known else []) + ["  " + b for b in bad]
+        if registry and not args.offline_images:
+            block.append("(image verification needs registry access; offline_images = "
+                         "\"digest\" or \"strip\" checks without it)")
+        _log("\n".join(block))
         return 1
+    if len(block) > 1:
+        _log("\n".join(block))
     if args.marker:
         with open(args.marker, "w") as f:
             f.write(head + "\n")
@@ -474,32 +925,22 @@ def cmd_apply(args):
 
 
 def cmd_mutate(args):
-    resources = _resource_files(args.resource)
     with tempfile.TemporaryDirectory() as tmp:
-        staged = _stage_policies(args.policy + args.exception, tmp)
-        if "policies.yaml" not in staged:
-            _log(f"kyverno_mutate {args.label}: no policies")
+        try:
+            staged, _, files, notes = _stage(args, tmp)
+        except Failed as e:
+            _log(f"kyverno_mutate {args.label}: {e}")
             return 2
         out = os.path.join(tmp, "out.yaml")
-        cmd = [args.kyverno, "apply", staged["policies.yaml"], "--remove-color", "-o", out]
-        for r in resources:
-            cmd += ["--resource", r]
-        if "exceptions.yaml" in staged:
-            cmd += ["--exception", staged["exceptions.yaml"]]
-        r = _run(cmd)
+        r = _run(_apply_cmd(args, staged, files) + ["-o", out])
         text = r.stdout + r.stderr
         if not os.path.exists(out) or re.search(r"error: [1-9]", text) or "Policies Skipped" in text:
             _log(f"kyverno_mutate {args.label}: kyverno apply failed (exit {r.returncode}):\n"
                  + text.strip()[-3000:])
             return 1
-        # Drop the trailing empty documents the CLI writes.
-        docs = [d for _, d in split_docs(open(out).read())]
         with open(args.out, "w") as f:
-            f.write("---\n".join(d if d.endswith("\n") else d + "\n" for d in docs))
+            f.write(_clean_mutated(out))
     return 0
-
-
-# ---- test -------------------------------------------------------------------------------------
 
 
 def _junit_from(stdout):
@@ -604,8 +1045,14 @@ def main(argv):
         a.add_argument("--policy", action="append", default=[])
         a.add_argument("--resource", action="append", default=[])
         a.add_argument("--exception", action="append", default=[])
+        a.add_argument("--values-file")
+        a.add_argument("--resource-filters")
+        a.add_argument("--offline-images", choices=("strip", "digest"))
         if mode == "apply":
             a.add_argument("--audit-warn", action="store_true")
+            a.add_argument("--expected-findings")
+            a.add_argument("--expected-mutations")
+            a.add_argument("--mutated")
             a.add_argument("--json")
             a.add_argument("--junit")
             a.add_argument("--marker")

@@ -12,6 +12,7 @@ Bazel rules for [Kyverno](https://kyverno.io), the Kubernetes policy engine. The
 - **Tests and checks**
   - `kyverno_test` — runs `kyverno test` suites (`kyverno-test.yaml`), with JUnit.
   - `kyverno_apply_test` — fails if any resource violates a policy, naming the policy, rule, resource and source file. Resources can be files, generated files or directories, such as rendered Helm charts.
+    - Options: a values file (namespace labels for `namespaceSelector`), a reviewed list of expected findings that fails when an entry goes stale, the Kyverno ConfigMap's `resourceFilters`, offline image verification, and expected mutations.
   - `kyverno_check` — the same as a validation action, so a violation fails `bazel build`.
   - `kyverno_mutate` — writes the resources as the policies mutate them.
 - **Cluster install (kind / production-shaped)**
@@ -23,11 +24,11 @@ No host Kyverno or Helm needed. The CLI is the upstream release for linux and da
 ## Install (Bzlmod)
 
 ```python
-bazel_dep(name = "rules_kyverno", version = "0.1.0")
+bazel_dep(name = "rules_kyverno", version = "0.2.0")
 git_override(
     module_name = "rules_kyverno",
     remote = "https://github.com/collider-bazel-extensions/rules_kyverno",
-    tag = "v0.1.0",
+    tag = "v0.2.0",
 )
 
 # rules_kyverno depends on rules_kubectl, which isn't in the BCR either.
@@ -80,7 +81,17 @@ Every build checks each document:
    ```
 
    Kinds: `ClusterPolicy`, `Policy`, `ValidatingPolicy`, `MutatingPolicy`, `GeneratingPolicy`, `ImageValidatingPolicy`, `DeletingPolicy` and their `Namespaced…` forms, `PolicyException` (both groups), `CleanupPolicy`, `ClusterCleanupPolicy` and `GlobalContextEntry`, in every version the CRDs serve. Kubernetes `ValidatingAdmissionPolicy` and `MutatingAdmissionPolicy` (and their bindings) are accepted with the load check only, since no Kyverno CRD describes them.
-2. **The CLI loads them.** The rule-bearing policies are applied to a resource none of them matches, so Kyverno compiles them. Bad CEL, a rule with two validation types and similar mistakes fail with Kyverno's message, e.g. `Kyverno skipped: … only one of pattern, anyPattern, deny, foreach, cel can be specified`.
+2. **The CLI loads them.** Kyverno compiles the rule-bearing policies, so bad CEL, a rule with two validation types and similar mistakes fail with Kyverno's message. Each problem names its file:
+
+   ```
+   kyverno_policy //platform:policies:
+     policies/legacy.yaml: Kyverno skipped: 1. two-validations: path: spec.rules[0].validate..: only one of pattern, anyPattern, deny, foreach, cel can be specified
+     policies/vap.yaml: Kyverno: ValidatingAdmissionPolicy max-replicas: compilation error: … Syntax error: …
+   ```
+
+   - **Kyverno kinds** are applied to a resource none of them matches.
+   - **`ValidatingAdmissionPolicy` / `MutatingAdmissionPolicy` and `ImageValidatingPolicy`** are loaded against a ConfigMap: the CLI needs a real kind for them. Each admission policy gets a binding of its own, so its CEL is compiled whether the files bind it or not. Only compile errors count, since the policy may fail on the ConfigMap itself. The pinned CLI (1.19.2) evaluates `MutatingAdmissionPolicy` only at `v1alpha1`; a `v1beta1` one loads without its CEL compiled.
+   - **Speed:** all files load in one CLI run. Only if that finds problems does each file load on its own, so every problem names its file and one file's compile error doesn't hide another's.
 
 The check runs on the pinned CLI with no network (`--sandbox_default_allow_network=false` works). `deps` bundle other `kyverno_policy` targets in front of `srcs`.
 
@@ -143,8 +154,58 @@ kyverno //deploy:manifests_comply_test: pass 14, fail 2, warn 0, error 0, skip 0
 - **Exceptions:** `PolicyException`s in `policies` or `exceptions` apply.
 - **Skipped kinds:** cleanup and deleting policies and global context entries act in a cluster, not on a resource, so they're left out of `apply`.
 - **Reports:**
-  - the test writes JUnit to Bazel, and Kyverno's policy report (JSON) to its undeclared outputs (`kyverno-report.json`);
-  - `kyverno_check` puts the report in the `kyverno` output group.
+  - the test writes JUnit to Bazel, and to its undeclared outputs Kyverno's policy report (JSON, `kyverno-report.json`) and the resources as the policies mutate them (`kyverno-mutated.yaml`);
+  - `kyverno_check` puts both in the `kyverno` output group (`<name>.kyverno.json`, `<name>.mutated.yaml`).
+
+### More inputs
+
+```python
+kyverno_apply_test(
+    name = "rendered_test",
+    policies = ["//platform:policies"],
+    resources = [":rendered_chart"],
+    values_file = "kyverno-values.yaml",            # namespace labels, variables
+    expected_findings = "known-findings.yaml",      # reviewed; stale entries fail
+    resource_filters = "@rules_kyverno//:kyverno_manifest",  # or your Kyverno ConfigMap
+    offline_images = "digest",                      # or "strip"
+    expected_mutations = "mutated.yaml",            # what mutate rules must produce
+)
+```
+
+All of them work on `kyverno_check` too. `values_file`, `resource_filters` and `offline_images` also work on `kyverno_mutate`.
+
+- **`values_file`:** a Kyverno CLI values file (`cli.kyverno.io/v1alpha1` `Value`), passed as `--values-file`. Offline, policies that match on `namespaceSelector` need namespace labels from it:
+
+  ```yaml
+  apiVersion: cli.kyverno.io/v1alpha1
+  kind: Value
+  metadata: {name: values}
+  namespaceSelector:
+    - name: shop
+      labels: {env: prod}
+  ```
+
+  Policy and rule variables and `globalValues` go in the same file.
+- **`expected_findings`:** a reviewed list of known violations. A finding listed here is reported as expected and doesn't fail. An entry that matches no finding fails as stale, so the list can't silently outlive the problem:
+
+  ```yaml
+  - policy: require-team-label
+    rule: check-team                # optional; autogen rules are autogen-check-team
+    resource: Deployment/shop/legacy-api   # Kind/namespace/name, as failures print it
+    reason: owned by the shop team after the Q1 migration (TICKET-123)
+  ```
+
+  `*` and `?` work as wildcards in `policy`, `rule` and `resource`. `reason` is required. Unknown fields are refused.
+- **`resource_filters`:** a file holding the Kyverno ConfigMap, alone or in a rendered chart. Resources its `resourceFilters` match are left out, as the admission controller skips them.
+  - **Which ConfigMap:** the one named `kyverno`, or the only one with `resourceFilters`.
+  - **Defaults:** `@rules_kyverno//:kyverno_manifest` is the pinned chart, with its default filters (kube-system, kube-public, kyverno, Events, ReplicaSets, …).
+  - **Matching:** offline, a manifest has no subresource, and a missing namespace counts as `''`.
+- **`offline_images`:** image verification needs a registry. As written, `verifyImages` rules and `ImageValidatingPolicy`s reach for one, even for digest checks, and fail in a sandbox without network. The test's message suggests this option when it sees that.
+  - `"strip"` leaves them out.
+  - `"digest"` keeps only the check that matching images are pinned by digest:
+    - a `verifyImages` entry keeps its `imageReferences` and `skipImageReferences`, with attestors, attestations and digest mutation removed;
+    - an `ImageValidatingPolicy` becomes a `ValidatingPolicy` with the same match rules (`matchImageReferences` globs and expressions, `matchConstraints`, `matchConditions`, autogen). It checks every container's image as written. Custom image extractors (`spec.images`) aren't checked.
+- **`expected_mutations`:** YAML of the resources as the policies should mutate them. Any difference fails, with a diff. They're compared as data, so formatting and key order don't count. The CLI writes every resource a mutating policy matched, changed or not. To update the file, copy `kyverno-mutated.yaml` from the test's outputs.
 
 ## `kyverno_mutate`
 
@@ -156,7 +217,7 @@ kyverno_mutate(
 )
 ```
 
-This writes the resources as the mutating policies change them, in one multi-document YAML file. It's useful to review what admission will do, or to ship pre-mutated manifests.
+This writes the resources as the mutating policies change them, in one multi-document YAML file. It's useful to review what admission will do, or to ship pre-mutated manifests. `values_file`, `resource_filters` and `offline_images` work as on `kyverno_apply_test`.
 
 ## Cluster install
 

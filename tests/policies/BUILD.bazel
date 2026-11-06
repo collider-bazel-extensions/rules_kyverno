@@ -19,6 +19,12 @@ kyverno_policy(
     srcs = ["add_team.yaml"],
 )
 
+# Kubernetes ValidatingAdmissionPolicy / MutatingAdmissionPolicy (#1).
+kyverno_policy(
+    name = "admission",
+    srcs = ["admission.yaml"],
+)
+
 kyverno_policy(
     name = "exceptions",
     srcs = ["exceptions.yaml"],

@@ -23,6 +23,14 @@ The check therefore validates every document against Kyverno's CRD schemas:
 
 Then the CLI load: the rule-bearing documents are applied to a synthetic `rules-kyverno.dev/v1alpha1 LoadProbe` that no policy matches. That compiles them without depending on any resource passing. A "Policies Skipped" block, `ERROR`/`Error` lines (bad CEL) or a non-zero `error:` count fail the check with Kyverno's own text.
 
+**Kinds the CLI maps to a GVR** before evaluating them fail on the `LoadProbe` with `failed to map gvk to gvr` (#1). These are Kubernetes `ValidatingAdmissionPolicy` / `MutatingAdmissionPolicy` and `ImageValidatingPolicy`; Kyverno's other kinds are fine. They load against a ConfigMap in a namespace nothing uses instead, and the CLI's quirks shape how:
+- **A VAP or MAP is compiled only when a binding selects it.** When one does, the CLI evaluates it against any resource and ignores its `matchConstraints`. So the staged copy drops the files' bindings, whose selectors could keep the probe out, and gives every policy a plain binding of its own.
+- **Only compile errors count.** A JSON report result of `error` whose message says `compil…` fails. So does a MAP's `compilation failed`, which appears only in the CLI's log (`-v 1`). Evaluation errors against the probe (`no such key: spec`) are expected and ignored.
+- **An IVP is compiled only once it matches,** so its staged copy matches ConfigMaps. The probe has no images, so nothing is fetched.
+- **A `v1beta1` MAP** is not evaluated by the 1.19.2 CLI at all ("Applying 0 policy rule(s)"). It passes without its CEL compiled.
+
+**Problems name their file (#2).** One CLI run loads every file: about 0.5 s, which matters for a validation action on large `srcs`. Only if that run finds problems does each file load on its own, and every problem is prefixed with its path. A CEL compile error also aborts the CLI run, so the per-file runs are what surface other files' problems. If no file fails alone, the files conflict, and the combined run's problems are reported as they are.
+
 **Which kinds go where:**
 - Exceptions and cleanup, deleting and global-context kinds get the schema check only. `apply` doesn't evaluate them as policies, and it reports a cleanup policy as *failing* a resource it doesn't match.
 - Kubernetes VAP/MAP kinds have no Kyverno CRD, so they get the load check only.
@@ -33,7 +41,29 @@ Then the CLI load: the rule-bearing documents are applied to a synthetic `rules-
 - **Staging:** the driver splits the given policy files by kind. RULE_KINDS go to a `policies.yaml`, and `PolicyException`s to an `exceptions.yaml` passed with `--exception`. Other kinds are left out.
 - **Messages:** a failure names `policy/rule`, `Kind/namespace/name` and, best effort, the resource file it came from. The file comes from a regex index of each document's `kind` and `metadata.name`, since the report doesn't say.
 - **`kyverno test`:** runs on each suite's directory with `--file-name`, `--require-tests` and `--detailed-results`. Runfiles keep workspace paths, so suites' relative paths resolve, and symlinked inputs work, as checked. A second run with `-o junit` produces the XML. The CLI prints it between log lines, so the driver cuts it out from `<?xml` to `</testsuites>`.
-- **`kyverno_mutate`:** uses `apply -o <file>` and drops the empty trailing documents the CLI writes.
+- **`kyverno_mutate`:** uses `apply -o <file>` and drops the empty trailing documents the CLI writes. `kyverno_apply_test` and `kyverno_check` also pass `-o`, which leaves the JSON report on stdout unchanged. The mutated resources go to their outputs and are compared with `expected_mutations`. The comparison is of canonical JSON (sorted keys) per document, with the documents converted in one CLI call, as items of one YAML sequence.
+
+## Inputs for real-world manifests (#3)
+
+These came from monok8s, which ran its own driver around the CLI for them.
+- **`values_file`** → `--values-file`. Offline, `namespaceSelector` has no namespaces to read, so a policy that uses it matches nothing without one.
+- **`expected_findings`:** a reviewed allowlist, checked in the driver after the report is parsed.
+  - Matching: a `fail` or `error` result matches an entry by `policy`, optional `rule`, and `resource` as the messages print it (`Kind/namespace/name`), with `*`/`?` wildcards.
+  - A matched finding is listed with its reason and passes in JUnit.
+  - An entry that matches nothing fails, so the list shrinks as problems are fixed.
+  - Why not PolicyExceptions: they're cluster objects, would also apply at admission, and can't fail when unused.
+  - Malformed entries (unknown field, missing `reason`) are refused before anything runs.
+- **`resource_filters`:** the CLI has no flag for the controller's `resourceFilters`, so the driver applies them, writing filtered copies of the resource files.
+  - Kind selectors take Kyverno's forms: `Kind`, `Kind/sub`, `version/Kind`, `group/version/Kind`, `…/sub`.
+  - Filters that need a subresource (`Node/?*`) never match a manifest.
+  - The ConfigMap can sit in a rendered chart. `//:kyverno_manifest` is the pinned chart, for its defaults.
+- **`offline_images`:** opt-in, because rewriting a policy could hide a real gap. Without network, `verifyImages` errors and fails on every matching image ("failed to fetch image", TUF downloads), even when only a digest check is wanted.
+  - `strip` drops those rules. A ClusterPolicy left with no rules is dropped too, with a note in the log.
+  - `digest` turns each `verifyImages` entry into `{imageReferences, skipImageReferences, verifyDigest: true, mutateDigest: false, required: false}`, which the CLI checks offline, autogen included.
+  - An IVP still fetches every matched image even with no attestors, so `digest` converts it to a `ValidatingPolicy`. That policy has the same `matchConstraints`, `matchConditions`, `validationActions`, `failurePolicy` and `autogen`, and one validation: no matched container image without `@`.
+    - Globs become anchored regexes. `expression` references run through `cel.bind(ref, image, …)`.
+    - The pod spec is found by `has(object.spec.template)` / `has(object.spec.jobTemplate)` / `object.spec`. That works for direct workload matches and survives autogen's rewrite of `object.spec`.
+  - When a test fails with registry errors and no `offline_images`, its message suggests the option.
 
 ## Install
 
@@ -45,9 +75,9 @@ Then the CLI load: the rule-bearing documents are applied to a synthetic `rules-
 - **Webhooks:** Kyverno creates its admission webhooks itself at start-up, so none are rendered. `kyverno_health_check` waits for the four controller Deployments.
 - **Policies:** `kyverno_policy_install` is `kubectl_apply` without `-n`, so namespaced policies keep their namespace. Kyverno compiles a policy and registers webhook rules for it after it's created, so "applied" isn't "enforced". `kyverno_policy_health_check` therefore reads each `kyverno_policy`'s index (written by its build-time check) and asks the cluster for each policy. A rule-bearing kind is ready when a `Ready` condition is `True` (or `status.ready` / `conditionStatus.ready`); other kinds when they exist. The smoke test checks admission right after, with server-side dry runs (`kubectl run --dry-run=server`), so no images are pulled.
 
-## Not done (v0.1)
+## Not done
 
 - **Remote policy sources and `--git-branch` suites:** the rules are hermetic, so suites and policies come from the workspace.
-- **Variables and values files for `kyverno_apply_test`** (`--values-file`, `--set`): `kyverno test` suites support them.
-- **Image verification against real registries** (`--registry`): no network.
+- **`--set` variables for `kyverno_apply_test`:** use `values_file`.
+- **Image verification against real registries** (`--registry`): no network. `offline_images` reduces it to the digest check or leaves it out.
 - **Chart values beyond the test footprint,** e.g. HA replicas, the reports server or policy reporter.

@@ -1,0 +1,10 @@
+# kube-public is in the chart's resourceFilters: the controller never sees it.
+apiVersion: v1
+kind: Pod
+metadata: {name: unlabelled, namespace: kube-public}
+spec: {containers: [{name: app, image: "registry.example/x:1.0"}]}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: labelled, namespace: shop, labels: {team: payments}}
+spec: {containers: [{name: app, image: "registry.example/x:1.0"}]}

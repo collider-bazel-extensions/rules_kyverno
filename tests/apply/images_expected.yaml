@@ -1,0 +1,8 @@
+# by-tag predates digest pinning.
+- policy: verify-acme
+  rule: autogen-signed
+  resource: Deployment/shop/by-tag
+  reason: pinned by digest in the next release
+- policy: verify-acme-cel
+  resource: Deployment/shop/by-tag
+  reason: pinned by digest in the next release

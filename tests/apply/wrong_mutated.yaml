@@ -1,0 +1,9 @@
+# What default-team-label makes of legacy.yaml (key order and style don't matter).
+apiVersion: v1
+kind: Pod
+metadata:
+  namespace: legacy
+  name: old-cron
+  labels: {team: payments}
+spec:
+  containers: [{name: app, image: "registry.example/cron:0.9"}]
