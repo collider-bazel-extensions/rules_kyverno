@@ -1,0 +1,179 @@
+"""Tests for rules_kyverno (no cluster needed; the install smoke lives in
+tests/install_smoke)."""
+
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load(
+    "//:defs.bzl",
+    "kyverno_apply_test",
+    "kyverno_check",
+    "kyverno_mutate",
+    "kyverno_policy_test",
+    "kyverno_test",
+)
+load(":analysis_tests.bzl", "analysis_test_suite")
+
+# ---- kyverno_test -----------------------------------------------------------------
+
+kyverno_test(
+    name = "suite_test",
+    srcs = ["suite/kyverno-test.yaml"],
+    data = ["suite/pods.yaml"],
+    policies = [
+        "//tests/policies:images",
+        "//tests/policies:team",
+    ],
+)
+
+# A suite with a wrong expectation; suite_failure_test runs it.
+kyverno_test(
+    name = "wrong_suite",
+    srcs = ["suite/wrong-test.yaml"],
+    data = ["suite/pods.yaml"],
+    policies = [
+        "//tests/policies:images",
+        "//tests/policies:team",
+    ],
+    tags = ["manual"],
+)
+
+sh_test(
+    name = "suite_failure_test",
+    srcs = ["suite_failure_test.sh"],
+    args = ["$(rootpath :wrong_suite)"],
+    data = [":wrong_suite"],
+)
+
+# ---- kyverno_apply_test --------------------------------------------------------------
+
+kyverno_apply_test(
+    name = "compliant_test",
+    policies = ["//tests/policies:all"],
+    resources = [
+        "//tests/resources:compliant.yaml",
+        "//tests/resources:rendered",
+    ],
+)
+
+# legacy.yaml has no team label; the PolicyException covers its namespace.
+kyverno_apply_test(
+    name = "exception_test",
+    exceptions = ["//tests/policies:exceptions"],
+    policies = ["//tests/policies:team"],
+    resources = ["//tests/resources:legacy.yaml"],
+)
+
+# Violations; apply_failure_test runs it.
+kyverno_apply_test(
+    name = "violations",
+    policies = ["//tests/policies:all"],
+    resources = [
+        "//tests/resources:compliant.yaml",
+        "suite/pods.yaml",
+    ],
+    tags = ["manual"],
+)
+
+sh_test(
+    name = "apply_failure_test",
+    srcs = ["apply_failure_test.sh"],
+    args = ["$(rootpath :violations)"],
+    data = [":violations"],
+)
+
+# ---- kyverno_check / kyverno_mutate ------------------------------------------------------
+
+# Built by `bazel build //...`: a generated manifest that must comply.
+kyverno_check(
+    name = "rendered_check",
+    policies = ["//tests/policies:all"],
+    resources = ["//tests/resources:rendered"],
+)
+
+# CI: `bazel build //tests:violations_check` must fail.
+kyverno_check(
+    name = "violations_check",
+    policies = ["//tests/policies:all"],
+    resources = ["suite/pods.yaml"],
+    tags = ["manual"],
+)
+
+kyverno_mutate(
+    name = "mutated",
+    policies = ["//tests/policies:mutations"],
+    resources = [
+        "//tests/resources:legacy.yaml",
+        "//tests/resources:rendered",
+    ],
+)
+
+sh_test(
+    name = "mutate_test",
+    srcs = ["mutate_test.sh"],
+    args = ["$(rootpath :mutated)"],
+    data = [":mutated"],
+)
+
+# ---- kyverno_policy_test itself --------------------------------------------------------
+
+# Wrong expectations on purpose; policy_test_failure_test runs them.
+kyverno_policy_test(
+    name = "expects_error_on_good",
+    srcs = ["//tests/policies:require_team.yaml"],
+    expect_error = "anything",
+    tags = ["manual"],
+)
+
+kyverno_policy_test(
+    name = "expects_pass_on_bad",
+    srcs = ["//tests/bad:typo_top.yaml"],
+    tags = ["manual"],
+)
+
+kyverno_policy_test(
+    name = "expects_other_error",
+    srcs = ["//tests/bad:typo_top.yaml"],
+    expect_error = "a message that is not there",
+    tags = ["manual"],
+)
+
+sh_test(
+    name = "policy_test_failure_test",
+    srcs = ["policy_test_failure_test.sh"],
+    args = [
+        "$(rootpath :expects_error_on_good)",
+        "$(rootpath :expects_pass_on_bad)",
+        "$(rootpath :expects_other_error)",
+    ],
+    data = [
+        ":expects_error_on_good",
+        ":expects_other_error",
+        ":expects_pass_on_bad",
+    ],
+)
+
+# ---- pins ------------------------------------------------------------------------------
+
+sh_test(
+    name = "checksums_test",
+    srcs = ["checksums_test.sh"],
+    data = ["//private:versions.bzl"],
+)
+
+sh_test(
+    name = "version_test",
+    srcs = ["version_test.sh"],
+    args = [
+        "$(rootpath //private:versions.bzl)",
+        "$(rootpath //:MODULE.bazel)",
+        "$(rootpath //private/manifests:kyverno.yaml)",
+        "$(rootpath //toolchain:current)",
+    ],
+    data = [
+        "//:MODULE.bazel",
+        "//private:versions.bzl",
+        "//private/manifests:kyverno.yaml",
+        "//toolchain:current",
+    ],
+)
+
+analysis_test_suite(name = "analysis_tests")

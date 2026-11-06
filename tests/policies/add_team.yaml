@@ -1,0 +1,17 @@
+# Mutation: Pods without a team label get team=platform.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: default-team-label
+spec:
+  rules:
+    - name: add-team
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+      mutate:
+        patchStrategicMerge:
+          metadata:
+            labels:
+              +(team): platform

@@ -1,0 +1,51 @@
+"""Maintainer-only render flow.
+
+Pipeline:
+  @kyverno_chart_<ver>//:files
+                       │
+                       ▼  helm_template (rules_helm), --no-hooks, CRDs included
+                       ▼
+       bazel-bin/tools/render_kyverno_<ver>.yaml
+                       │
+                       ▼  bazel run //tools:render_writeback_<ver>
+                       ▼
+   private/manifests/kyverno.yaml (committed; what consumers apply)
+                       │
+                       ▼  bazel run //tools:extract_schemas
+                       ▼
+   private/schemas/schemas.json (the policy CRDs' OpenAPI schemas; committed)
+
+No host helm needed at any point. CI fails if either committed file
+drifts from what these produce.
+"""
+
+load("@rules_helm//:defs.bzl", "helm_template")
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
+
+exports_files([
+    "render_kyverno.sh",
+    "update_checksums.sh",
+    "versions.bzl",
+])
+
+# ---- 3.9.2 (Kyverno 1.19.2) ----------------------------------------------------
+
+helm_template(
+    name = "render_kyverno_3_9_2",
+    chart = ["@kyverno_chart_3_9_2//:files"],
+    helm_template_args = ["--no-hooks"],
+    include_crds = True,
+    namespace = "kyverno",
+    release_name = "kyverno",
+    values = ["//config:kyverno-values.yaml"],
+)
+
+sh_binary(
+    name = "render_writeback_3_9_2",
+    srcs = ["writeback.sh"],
+    args = [
+        "$(rootpath :render_kyverno_3_9_2)",
+        "private/manifests/kyverno.yaml",
+    ],
+    data = [":render_kyverno_3_9_2"],
+)

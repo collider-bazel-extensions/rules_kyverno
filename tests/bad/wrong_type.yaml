@@ -1,0 +1,12 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: wrong-type
+spec:
+  background: "yes"
+  rules:
+    - name: r
+      match: {any: [{resources: {kinds: [Pod]}}]}
+      validate:
+        message: m
+        pattern: {metadata: {labels: {team: "?*"}}}

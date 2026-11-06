@@ -1,0 +1,11 @@
+package(default_visibility = ["//tests:__subpackages__"])
+
+exports_files(glob(["*.yaml"]))
+
+# A generated manifest (as a Helm render would be).
+genrule(
+    name = "rendered",
+    outs = ["rendered.yaml"],
+    cmd = "$(location make_rendered.sh) $@",
+    tools = ["make_rendered.sh"],
+)

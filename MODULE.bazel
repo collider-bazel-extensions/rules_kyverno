@@ -1,0 +1,91 @@
+"""rules_kyverno — Kyverno policies for Bazel.
+
+  Policies (build time):
+    kyverno_policy        — policy files checked on every build: Kyverno's
+                            CRD schemas (unknown fields, which Kyverno
+                            otherwise ignores by dropping the policy) and
+                            the CLI loading them
+  Tests and checks:
+    kyverno_test          — `kyverno test` suites (kyverno-test.yaml)
+    kyverno_apply_test    — resources (e.g. rendered manifests) comply with policies
+    kyverno_check         — the same as a validation action (fails `bazel build`)
+    kyverno_mutate        — resources as the policies mutate them (an output file)
+  Cluster install (kind / production-shaped):
+    kyverno_install / kyverno_health_check — the pinned kyverno Helm chart
+    kyverno_policy_install / _health_check — policies applied and Ready
+
+Pinned: Kyverno 1.19.2 (CLI binaries, and the image the chart deploys),
+kyverno chart 3.9.2.
+"""
+
+module(
+    name = "rules_kyverno",
+    version = "0.1.0",
+)
+
+bazel_dep(name = "bazel_skylib", version = "1.8.2")
+bazel_dep(name = "platforms", version = "1.0.0")
+
+# Public binary toolchain. The `kyverno` extension creates kyverno_<platform>
+# repos at the root module's kyverno.version(), or at this module's when the
+# root names none.
+kyverno = use_extension("//:extensions.bzl", "kyverno")
+kyverno.version(version = "1.19.2")
+use_repo(
+    kyverno,
+    "kyverno_darwin_amd64",
+    "kyverno_darwin_arm64",
+    "kyverno_linux_amd64",
+    "kyverno_linux_arm64",
+)
+register_toolchains("@rules_kyverno//toolchain:all")
+
+# rules_kubectl is a public dep — kyverno_install and kyverno_policy_install
+# wrap `kubectl_apply`.
+bazel_dep(name = "rules_kubectl", version = "0.2.0")
+git_override(
+    module_name = "rules_kubectl",
+    remote = "https://github.com/collider-bazel-extensions/rules_kubectl",
+    commit = "81b60ab80df46b64c612f2576ffef0a7af98ccb6",  # v0.2.0
+)
+
+# ---- dev-only: maintainer chart-render flow + tests ----------------------------
+
+bazel_dep(name = "rules_shell", version = "0.8.0", dev_dependency = True)
+
+bazel_dep(name = "rules_helm", version = "0.2.1", dev_dependency = True)
+git_override(
+    module_name = "rules_helm",
+    remote = "https://github.com/collider-bazel-extensions/rules_helm",
+    commit = "48651387d55f0c50f6d059df246ed73767100afb",  # v0.2.1
+)
+
+helm = use_extension("@rules_helm//:extensions.bzl", "helm", dev_dependency = True)
+helm.version(version = "3.20.2")
+use_repo(
+    helm,
+    "helm_darwin_amd64",
+    "helm_darwin_arm64",
+    "helm_linux_amd64",
+)
+register_toolchains(
+    "@helm_linux_amd64//:toolchain",
+    "@helm_darwin_amd64//:toolchain",
+    "@helm_darwin_arm64//:toolchain",
+    dev_dependency = True,
+)
+
+bazel_dep(name = "rules_itest", version = "0.0.52", dev_dependency = True)
+
+bazel_dep(name = "rules_kind", version = "0.3.1", dev_dependency = True)
+git_override(
+    module_name = "rules_kind",
+    remote = "https://github.com/collider-bazel-extensions/rules_kind",
+    commit = "2640f42ebcb9a6155094b3fc515f5c476bd7b5b8",  # v0.3.1
+)
+
+# Maintainer-side: the Kyverno Helm chart .tgz at the pinned version.
+# Fires only when rules_kyverno is the root module.
+kyverno_chart = use_extension("//tools:extensions.bzl", "kyverno_chart", dev_dependency = True)
+kyverno_chart.version(version = "3.9.2")
+use_repo(kyverno_chart, "kyverno_chart_3_9_2")

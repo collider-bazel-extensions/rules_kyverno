@@ -1,0 +1,8 @@
+# No team label, but in namespace legacy: exempt via PolicyException.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: old-cron
+  namespace: legacy
+spec:
+  containers: [{name: app, image: "registry.example/cron:0.9"}]

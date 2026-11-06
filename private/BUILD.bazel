@@ -1,0 +1,75 @@
+"""Private build files for rules_kyverno. Public surface lives in
+//:defs.bzl, which re-exports from here."""
+
+load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
+load(":schemas.bzl", "kyverno_schemas")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(glob(["*"]))
+
+# The policy CRDs' schemas, from the same pre-rendered chart kyverno_install
+# deploys.
+kyverno_schemas(
+    name = "schemas",
+    manifest = "//private/manifests:kyverno.yaml",
+)
+
+
+bzl_library(
+    name = "providers",
+    srcs = ["providers.bzl"],
+)
+
+bzl_library(
+    name = "common",
+    srcs = ["common.bzl"],
+)
+
+[bzl_library(
+    name = n,
+    srcs = [n + ".bzl"],
+    deps = [
+        ":common",
+        ":providers",
+    ],
+) for n in [
+    "policy",
+    "test",
+]]
+
+bzl_library(
+    name = "schemas_bzl",
+    srcs = ["schemas.bzl"],
+    deps = [":common"],
+)
+
+bzl_library(
+    name = "check",
+    srcs = ["check.bzl"],
+    deps = [
+        ":common",
+        ":test",
+    ],
+)
+
+bzl_library(
+    name = "install",
+    srcs = ["install.bzl"],
+    deps = [
+        ":common",
+        ":providers",
+        "@rules_kubectl//:defs",
+    ],
+)
+
+bzl_library(
+    name = "versions",
+    srcs = ["versions.bzl"],
+)
+
+bzl_library(
+    name = "repositories",
+    srcs = ["repositories.bzl"],
+    deps = [":versions"],
+)

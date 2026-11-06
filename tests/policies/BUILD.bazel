@@ -1,0 +1,34 @@
+load("//:defs.bzl", "kyverno_policy")
+
+package(default_visibility = ["//tests:__subpackages__"])
+
+exports_files(glob(["*.yaml"]))
+
+kyverno_policy(
+    name = "team",
+    srcs = ["require_team.yaml"],
+)
+
+kyverno_policy(
+    name = "images",
+    srcs = ["no_latest_cel.yaml"],
+)
+
+kyverno_policy(
+    name = "mutations",
+    srcs = ["add_team.yaml"],
+)
+
+kyverno_policy(
+    name = "exceptions",
+    srcs = ["exceptions.yaml"],
+)
+
+# Everything the cluster gets: deps are bundled in order.
+kyverno_policy(
+    name = "all",
+    deps = [
+        ":images",
+        ":team",
+    ],
+)

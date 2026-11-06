@@ -1,0 +1,16 @@
+# Kyverno chart values for the pre-rendered install (rendered with
+# --no-hooks: no CRD-migration or webhook-cleanup hook Jobs).
+# One replica of each controller: a test-cluster footprint.
+admissionController:
+  replicas: 1
+backgroundController:
+  replicas: 1
+cleanupController:
+  replicas: 1
+reportsController:
+  replicas: 1
+crds:
+  migration:
+    enabled: false
+webhooksCleanup:
+  enabled: false

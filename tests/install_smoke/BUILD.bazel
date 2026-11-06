@@ -1,0 +1,106 @@
+"""Install smoke (manual; needs Docker or podman):
+
+  kind_svc → kyverno_svc (kyverno_install) → policies_svc (kyverno_policy_install)
+           → smoke_test
+
+The policies are //tests/policies:all (a ClusterPolicy and a CEL
+ValidatingPolicy); the smoke checks admission denies and admits Pods as
+they say, with server-side dry runs.
+"""
+
+load("@rules_itest//:itest.bzl", "itest_service", "service_test")
+load("@rules_kind//:defs.bzl", "kind_cluster", "kind_health_check")
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load(
+    "//:defs.bzl",
+    "kyverno_health_check",
+    "kyverno_install",
+    "kyverno_policy_health_check",
+    "kyverno_policy_install",
+)
+
+kind_cluster(name = "cluster", k8s_version = "1.35")
+
+kind_health_check(name = "cluster_health", cluster = ":cluster")
+
+itest_service(
+    name = "kind_svc",
+    exe = ":cluster",
+    health_check = ":cluster_health",
+    # Let rules_kind finish `kind delete` itself.
+    shutdown_timeout = "300s",
+    tags = ["manual"],
+)
+
+kyverno_install(name = "kyverno_install_bin", tags = ["manual"])
+
+kyverno_health_check(name = "kyverno_health_bin", tags = ["manual"])
+
+kyverno_policy_install(
+    name = "policy_install_bin",
+    policies = ["//tests/policies:all"],
+    tags = ["manual"],
+)
+
+kyverno_policy_health_check(
+    name = "policy_health_bin",
+    policies = ["//tests/policies:all"],
+    tags = ["manual"],
+)
+
+sh_binary(
+    name = "with_kind_env",
+    srcs = ["with_kind_env.sh"],
+    data = [
+        ":kyverno_health_bin",
+        ":kyverno_install_bin",
+        ":policy_health_bin",
+        ":policy_install_bin",
+    ],
+)
+
+itest_service(
+    name = "kyverno_svc",
+    args = ["$(rootpath :kyverno_install_bin)"],
+    data = [
+        ":kyverno_health_bin",
+        ":kyverno_install_bin",
+    ],
+    exe = ":with_kind_env",
+    health_check = ":with_kind_env",
+    health_check_args = ["$(rootpath :kyverno_health_bin)"],
+    deps = [":kind_svc"],
+    tags = ["manual"],
+)
+
+itest_service(
+    name = "policies_svc",
+    args = ["$(rootpath :policy_install_bin)"],
+    data = [
+        ":policy_health_bin",
+        ":policy_install_bin",
+    ],
+    exe = ":with_kind_env",
+    health_check = ":with_kind_env",
+    health_check_args = ["$(rootpath :policy_health_bin)"],
+    deps = [":kyverno_svc"],
+    tags = ["manual"],
+)
+
+sh_test(
+    name = "smoke_test_bin",
+    srcs = ["smoke_test.sh"],
+    tags = ["manual"],
+)
+
+service_test(
+    name = "smoke_test",
+    services = [":policies_svc"],
+    test = ":smoke_test_bin",
+    tags = [
+        "manual",
+        "no-sandbox",
+        "requires-network",
+    ],
+)

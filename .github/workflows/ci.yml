@@ -1,0 +1,89 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    # Everything that needs no cluster: policy checks (schema + CLI load),
+    # kyverno test suites, apply tests, checks, mutate, pins, analysis tests,
+    # and the committed chart render.
+    name: bazel test (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: bazel-contrib/setup-bazel@0.15.0
+        with:
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}-test
+          repository-cache: true
+
+      - name: bazel build //...
+        run: bazel build //...
+
+      - name: bazel test //tests/...
+        run: bazel test //tests/... --test_output=errors
+
+      - name: Build-time failures
+        run: |
+          expect_fail() {  # expect_fail <message> <bazel build args...>
+            local msg="$1"; shift
+            if bazel build "$@" 2> build.log; then echo "FAIL: bazel build $* succeeded" >&2; exit 1; fi
+            grep -qF "$msg" build.log || { cat build.log; echo "FAIL: '$msg' not in the output" >&2; exit 1; }
+            echo "ok: bazel build $* failed with: $msg"
+          }
+          expect_fail "unknown field 'validationFailureActon' (did you mean 'validationFailureAction'?)" //tests/bad:typo_top
+          expect_fail "Pod/shop/unlabelled  (tests/suite/pods.yaml)" //tests:violations_check
+
+      - name: Committed manifest matches the render
+        run: |
+          bazel run //tools:render_writeback_3_9_2
+          git diff --exit-code private/manifests/kyverno.yaml
+
+      - name: Pins match the published checksums
+        run: tools/update_checksums.sh --check
+
+      - name: Upload test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bazel-testlogs-test
+          path: bazel-testlogs/
+          if-no-files-found: ignore
+
+  smoke:
+    # kind + kyverno_install + kyverno_policy_install: a ClusterPolicy and a
+    # CEL ValidatingPolicy deny and admit Pods at admission.
+    name: install smoke (ubuntu-latest, docker)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: bazel-contrib/setup-bazel@0.15.0
+        with:
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}-smoke
+          repository-cache: true
+
+      - name: Verify Docker is available
+        run: docker version
+
+      - name: bazel test //tests/install_smoke:smoke_test
+        run: bazel test //tests/install_smoke:smoke_test --test_output=streamed --test_timeout=1500
+
+      - name: No kind clusters left behind
+        if: always()
+        run: |
+          left=$(docker ps -a --filter label=io.x-k8s.kind.cluster --format '{{.Names}}')
+          if [[ -n "$left" ]]; then echo "FAIL: kind nodes left: $left" >&2; exit 1; fi
+
+      - name: Upload test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bazel-testlogs-smoke
+          path: bazel-testlogs/
+          if-no-files-found: ignore

@@ -1,0 +1,12 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: checkout
+  namespace: shop
+  labels: {team: payments}
+spec:
+  selector: {matchLabels: {app: checkout}}
+  template:
+    metadata: {labels: {app: checkout, team: payments}}
+    spec:
+      containers: [{name: app, image: "registry.example/checkout:2.0.1"}]

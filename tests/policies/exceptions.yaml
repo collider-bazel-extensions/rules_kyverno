@@ -1,0 +1,30 @@
+# The legacy namespace is exempt from the team label (two documents: an
+# exception and a cleanup policy, which is schema-checked only).
+apiVersion: kyverno.io/v2
+kind: PolicyException
+metadata:
+  name: legacy-without-team
+  namespace: kyverno
+spec:
+  exceptions:
+    - policyName: require-team-label
+      ruleNames: [check-team]
+  match:
+    any:
+      - resources:
+          kinds: [Pod]
+          namespaces: [legacy]
+---
+apiVersion: kyverno.io/v2
+kind: ClusterCleanupPolicy
+metadata:
+  name: remove-finished-debug-pods
+spec:
+  schedule: "*/30 * * * *"
+  match:
+    any:
+      - resources:
+          kinds: [Pod]
+          selector:
+            matchLabels:
+              purpose: debug

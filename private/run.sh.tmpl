@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# rules_kyverno test wrapper: resolves the driver, runs it on runfiles.
+# Substitution markers use __KEY__ syntax to avoid colliding with bash.
+set -euo pipefail
+
+if [[ -z "${RUNFILES_DIR:-}" ]]; then
+  if [[ -n "${TEST_SRCDIR:-}" ]]; then RUNFILES_DIR="$TEST_SRCDIR"
+  elif [[ -d "${0}.runfiles" ]]; then RUNFILES_DIR="${0}.runfiles"
+  fi
+  : "${RUNFILES_DIR:?rules_kyverno: no runfiles found; run it with bazel test}"
+  export RUNFILES_DIR
+fi
+
+driver=""
+for c in "${RUNFILES_DIR}/_main/__DRIVER__" "${RUNFILES_DIR}/__DRIVER__" "${RUNFILES_DIR}/__DRIVER_EXT__"; do
+  [[ -e "$c" ]] && { driver="$c"; break; }
+done
+[[ -n "$driver" ]] || { echo "rules_kyverno: not in runfiles: __DRIVER__" >&2; exit 1; }
+
+out="${TEST_UNDECLARED_OUTPUTS_DIR:-${TEST_TMPDIR:-${TMPDIR:-/tmp}}}"
+reports=()
+__REPORTS__
+if [[ -n "${XML_OUTPUT_FILE:-}" ]]; then reports+=(--junit "$XML_OUTPUT_FILE"); fi
+
+exec python3 "$driver" __MODE__ --runfiles __ARGS__ ${reports[@]+"${reports[@]}"}

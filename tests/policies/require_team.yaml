@@ -1,0 +1,24 @@
+# Pods and Deployments must say which team owns them.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-team-label
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: check-team
+      match:
+        any:
+          - resources:
+              kinds: [Pod, Deployment]
+      exclude:
+        any:
+          - resources:
+              namespaces: [kube-system, kyverno]
+      validate:
+        message: "label 'team' is required"
+        pattern:
+          metadata:
+            labels:
+              team: "?*"

@@ -1,0 +1,28 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: team-and-images
+policies:
+  - ../policies/require_team.yaml
+  - ../policies/no_latest_cel.yaml
+resources:
+  - pods.yaml
+results:
+  - policy: require-team-label
+    rule: check-team
+    resources: [labelled, latest]
+    kind: Pod
+    result: pass
+  - policy: require-team-label
+    rule: check-team
+    resources: [unlabelled]
+    kind: Pod
+    result: fail
+  - policy: disallow-latest-tag
+    resources: [labelled, unlabelled]
+    kind: Pod
+    result: pass
+  - policy: disallow-latest-tag
+    resources: [latest]
+    kind: Pod
+    result: fail

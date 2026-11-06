@@ -1,0 +1,65 @@
+# Policies the check must refuse; each kyverno_policy_test names the error.
+load("//:defs.bzl", "kyverno_policy", "kyverno_policy_test")
+
+exports_files(glob(["*.yaml"]))
+
+kyverno_policy_test(
+    name = "typo_top_test",
+    srcs = ["typo_top.yaml"],
+    expect_error = "spec.validationFailureActon: unknown field 'validationFailureActon' \\(did you mean 'validationFailureAction'\\?\\)",
+)
+
+kyverno_policy_test(
+    name = "typo_nested_test",
+    srcs = ["typo_nested.yaml"],
+    expect_error = "spec.validations\\[0\\].expresion: unknown field 'expresion' \\(did you mean 'expression'\\?\\)",
+)
+
+kyverno_policy_test(
+    name = "wrong_type_test",
+    srcs = ["wrong_type.yaml"],
+    expect_error = "spec.background: expected boolean, got string",
+)
+
+kyverno_policy_test(
+    name = "bad_cel_test",
+    srcs = ["bad_cel.yaml"],
+    expect_error = "Syntax error",
+)
+
+kyverno_policy_test(
+    name = "two_validations_test",
+    srcs = ["two_validations.yaml"],
+    expect_error = "Kyverno skipped: .*only one of pattern, anyPattern, deny, foreach, cel can be specified",
+)
+
+kyverno_policy_test(
+    name = "not_yaml_test",
+    srcs = ["not_yaml.yaml"],
+    expect_error = "not_yaml.yaml:1: not valid YAML",
+)
+
+kyverno_policy_test(
+    name = "not_a_policy_test",
+    srcs = ["not_a_policy.yaml"],
+    expect_error = "v1/ConfigMap is not a Kyverno policy kind",
+)
+
+# The good policies pass the same test (no expect_error).
+kyverno_policy_test(
+    name = "good_policies_test",
+    srcs = [
+        "//tests/policies:add_team.yaml",
+        "//tests/policies:exceptions.yaml",
+        "//tests/policies:no_latest_cel.yaml",
+        "//tests/policies:require_team.yaml",
+    ],
+)
+
+# For the by-hand / CI check that a bad policy fails `bazel build`; manual,
+# so `//...` skips it.
+kyverno_policy(
+    name = "typo_top",
+    srcs = ["typo_top.yaml"],
+    tags = ["manual"],
+)
