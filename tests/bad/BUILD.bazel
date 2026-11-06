@@ -78,6 +78,21 @@ kyverno_policy_test(
     expect_error = "tests/bad/map_bad_cel.yaml: Kyverno: map-bad-cel: compilation failed: .*Syntax error",
 )
 
+# Behind matchConditions the probe doesn't meet, every CEL expression is
+# still compiled, and named by its field when the CLI can't name it (#5).
+[kyverno_policy_test(
+    name = name,
+    srcs = [src],
+    expect_error = expect,
+) for name, src, expect in [
+    ("vap_mc_validation_test", "vap_match_conditions.yaml", "^  tests/bad/vap_match_conditions.yaml: Kyverno: ValidatingAdmissionPolicy vap-match-conditions: .*Syntax error"),
+    ("vap_mc_variable_test", "vap_match_conditions.yaml", "vap-match-conditions \\(spec.variables\\[0\\] \\(replicas\\)\\): .*<input>:1:1: undeclared reference to 'objet'"),
+    ("vap_mc_message_test", "vap_match_conditions.yaml", "vap-match-conditions \\(spec.validations\\[0\\].messageExpression\\): .*undeclared reference to 'objekt'"),
+    ("vap_mc_audit_test", "vap_match_conditions.yaml", "vap-match-conditions \\(spec.auditAnnotations\\[0\\] \\(owner\\)\\): .*undeclared reference to 'owner'"),
+    ("map_mc_mutation_test", "map_match_conditions.yaml", "^  tests/bad/map_match_conditions.yaml: Kyverno: map-match-conditions: compilation failed: .*undeclared reference to 'objet'"),
+    ("map_mc_variable_test", "map_match_conditions.yaml", "map-match-conditions \\(spec.variables\\[0\\] \\(tier\\)\\): .*undeclared reference to 'tier'"),
+]]
+
 # With several files, each load problem names its file (#2), and a CEL
 # compile error in one file doesn't hide the others' problems.
 [kyverno_policy_test(

@@ -70,6 +70,14 @@ kyverno_apply_test(
     resources = ["//tests/resources:legacy.yaml"],
 )
 
+# Only the resources the policies changed are written and compared (#6).
+kyverno_apply_test(
+    name = "changed_only_test",
+    expected_mutations = "mixed_mutated.yaml",
+    policies = ["//tests/policies:mutations"],
+    resources = ["mixed.yaml"],
+)
+
 # ---- must fail; expected_failure_test runs them ----
 
 [kyverno_apply_test(
@@ -93,6 +101,17 @@ kyverno_apply_test(
     tags = ["manual"],
 )
 
+# Two files with one Role: refused before the CLI panics on it (#7).
+kyverno_apply_test(
+    name = "duplicates",
+    policies = ["//tests/policies:mutations"],
+    resources = [
+        "role.yaml",
+        "role_copy.yaml",
+    ],
+    tags = ["manual"],
+)
+
 # Without offline_images, verification reaches for the registry.
 kyverno_apply_test(
     name = "online_images",
@@ -113,9 +132,11 @@ sh_test(
         "$(rootpath :bad_expected)",
         "$(rootpath :wrong_mutations)",
         "$(rootpath :online_images)",
+        "$(rootpath :duplicates)",
     ],
     data = [
         ":bad_expected",
+        ":duplicates",
         ":online_images",
         ":stale",
         ":unexpected",

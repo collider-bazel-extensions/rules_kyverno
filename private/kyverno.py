@@ -28,8 +28,9 @@ converted to JSON by the pinned CLI itself (`kyverno jp query -i FILE @`).
       kyverno_apply_test / kyverno_check: every resource must pass every
       policy (fail or error results fail; warn and skip are reported),
       except findings listed in --expected-findings; a listed finding that
-      no longer occurs fails. --expected-mutations: the mutated resources
-      must equal these.
+      no longer occurs fails. --mutated / --expected-mutations: the
+      resources the policies changed (must equal these). Resources with the
+      same identity fail first (the CLI panics on them).
 
   kyverno.py mutate --kyverno BIN --label L --policy F... --resource F...
                     [--values-file F] [--resource-filters F]
@@ -413,12 +414,21 @@ def _load_admission(kyverno, objs, tmp):
       resource, ignoring its matchConstraints. So every policy gets a
       binding of its own (the files' bindings are left out: their selectors
       could keep the probe out). MutatingAdmissionPolicy compile errors
-      appear only in the CLI's log (-v 1).
+      appear only in the CLI's log (-v 1). The CLI compiles matchConditions
+      first and the rest only if they match the probe, and it never reports
+      errors in variables, messageExpression or auditAnnotations. So each
+      such policy also gets copies (#5, see _cel_copies), reported under the
+      policy's own name.
     - ImageValidatingPolicy: compiled only once it matches, so the staged
       copy matches ConfigMaps. With no images in the probe, nothing is
       fetched."""
-    docs = []
+    docs, copies, names = [], [], {}
     for o in objs:
+        if o["kind"] in ADMISSION_KINDS:
+            for c, where in _cel_copies(o):
+                copies.append(c)
+                names[c["metadata"]["name"]] = o["metadata"]["name"] + (f" ({where})" if where else "")
+    for o in objs + copies:
         name = (o.get("metadata") or {}).get("name", "")
         if o["kind"] in IMAGE_KINDS:
             o = json.loads(json.dumps(o))
@@ -453,7 +463,59 @@ def _load_admission(kyverno, objs, tmp):
     if _report(r.stdout) is None and not problems:
         problems.append(f"kyverno apply failed (exit {r.returncode}):\n"
                         + (err.strip() or r.stdout.strip())[-1500:])
+    if names:
+        copy = re.compile("|".join(re.escape(n) for n in sorted(names, key=len, reverse=True)) + r"\b")
+        def own(p):
+            m = copy.search(p)
+            if m and not m.group(0).endswith(_CEL_COPY + "0"):
+                # the wrapper's first line
+                p = re.sub(r"<input>:(\d+):", lambda l: f"<input>:{int(l.group(1)) - 1}:", p)
+            return copy.sub(lambda m: names[m.group(0)], p)
+        problems = list(dict.fromkeys(own(p) for p in problems))
     return problems
+
+
+_CEL_COPY = "--rules-kyverno-cel-"
+# A bool for a validation, a list(JSONPatch) for a mutation; either way the
+# wrapped expression is only compiled, whatever its type (newlines: it may
+# end in a comment).
+_WRAP = {"ValidatingAdmissionPolicy": "[\n{}\n].size() >= 0",
+         "MutatingAdmissionPolicy": '[JSONPatch{{op: "test", path: "/"}}].filter(p, [\n{}\n].size() < 0)'}
+
+
+def _cel_copies(obj):
+    """Copies of an admission policy that make the CLI compile all its CEL:
+    one without matchConditions (the CLI compiles the rest only when they
+    match), and one per variable, messageExpression and auditAnnotation
+    (whose errors it never reports) with that expression wrapped as the
+    copy's only validation or mutation. Returns [(copy, field path)]."""
+    spec = obj.get("spec") or {}
+    name = obj["metadata"]["name"]
+    base = json.loads(json.dumps(obj))
+    base["spec"].pop("matchConditions", None)
+    out = []
+    if spec.get("matchConditions"):
+        out.append((json.loads(json.dumps(base)), ""))
+        out[0][0]["metadata"]["name"] = name + _CEL_COPY + "0"
+    exprs = [(f"spec.variables[{i}] ({v.get('name')})", v.get("expression"))
+             for i, v in enumerate(spec.get("variables") or [])]
+    exprs += [(f"spec.validations[{i}].messageExpression", v.get("messageExpression"))
+              for i, v in enumerate(spec.get("validations") or [])]
+    exprs += [(f"spec.auditAnnotations[{i}] ({a.get('key')})", a.get("valueExpression"))
+              for i, a in enumerate(spec.get("auditAnnotations") or [])]
+    for expr_where, expr in exprs:
+        if not isinstance(expr, str) or not expr.strip():
+            continue
+        c = json.loads(json.dumps(base))
+        c["metadata"]["name"] = f"{name}{_CEL_COPY}{len(out) + 1}"
+        wrapped = _WRAP[obj["kind"]].format(expr)
+        c["spec"].pop("auditAnnotations", None)
+        if obj["kind"] == "ValidatingAdmissionPolicy":
+            c["spec"]["validations"] = [{"expression": wrapped}]
+        else:
+            c["spec"]["mutations"] = [{"patchType": "JSONPatch", "jsonPatch": {"expression": wrapped}}]
+        out.append((c, expr_where))
+    return out
 
 
 # ---- apply / mutate -----------------------------------------------------------------------
@@ -643,23 +705,88 @@ def _filtered(obj, filters):
                for fg, fv, fk, fs, fn, fm in filters)
 
 
-def _apply_filters(kyverno, resources, filters, tmp):
+def _apply_filters(read, filters, tmp):
     """Copies of the resource files without the filtered documents.
-    Returns (files, number of documents left out)."""
-    out, skipped = [], 0
-    for i, path in enumerate(resources):
-        docs = [d for _, d in split_docs(open(path).read())]
-        try:
-            objs = docs_to_json(kyverno, docs, tmp)
-        except Failed as e:
-            raise Failed(f"{path}: {e}")
-        keep = [d for d, o in zip(docs, objs) if not (isinstance(o, dict) and _filtered(o, filters))]
+    Returns (read with the filtered documents left out, files, number of
+    documents left out)."""
+    out, files, skipped = [], [], 0
+    for i, (path, shown, docs) in enumerate(read):
+        keep = [(d, o) for d, o in docs if not (isinstance(o, dict) and _filtered(o, filters))]
         skipped += len(docs) - len(keep)
         if keep:
-            d = os.path.join(tmp, "filtered", str(i))
-            os.makedirs(d, exist_ok=True)
-            out.append(_write(d, os.path.basename(path), _join(keep)))
-    return out, skipped
+            sub = os.path.join(tmp, "filtered", str(i))
+            os.makedirs(sub, exist_ok=True)
+            files.append(_write(sub, os.path.basename(path), _join([d for d, _ in keep])))
+            out.append((path, shown, keep))
+    return out, files, skipped
+
+
+# ---- resource identities ---------------------------------------------------------------
+
+
+def _read_resources(kyverno, resources, shown, tmp):
+    """[(file, shown name, [(document, value)])] for the resource files, with
+    one CLI call (one per file to name the one that can't be read)."""
+    texts = [[d for _, d in split_docs(open(p).read())] for p in resources]
+    try:
+        objs = docs_to_json(kyverno, [d for ds in texts for d in ds], tmp)
+    except Failed:
+        for ds, s in zip(texts, shown):
+            try:
+                docs_to_json(kyverno, ds, tmp)
+            except Failed as e:
+                raise Failed(f"{s}: {e}")
+        raise
+    out, i = [], 0
+    for p, s, ds in zip(resources, shown, texts):
+        out.append((p, s, list(zip(ds, objs[i:i + len(ds)]))))
+        i += len(ds)
+    return out
+
+
+def _identity(obj):
+    """What the CLI's fake client keys an object by; it puts an object
+    without a namespace in `default`."""
+    if not isinstance(obj, dict) or "kind" not in obj:
+        return None
+    meta = obj.get("metadata") or {}
+    return (obj.get("apiVersion"), obj["kind"], meta.get("namespace") or "default", meta.get("name") or "")
+
+
+def _duplicates(read):
+    """Objects with one identity: the CLI panics on them ("already exists",
+    naming neither file), so name them all first (#7)."""
+    where = {}
+    for _, shown, docs in read:
+        for _, o in docs:
+            k = _identity(o)
+            if k:
+                where.setdefault(k, []).append(shown)
+    dups = [f"{k[1]}/{k[2]}/{k[3] or '(no name)'} ({k[0]}) in " + ", ".join(fs)
+            for k, fs in where.items() if len(fs) > 1]
+    if dups:
+        raise Failed("resources with the same identity (kind, namespace, name); the CLI loads "
+                     "each only once:\n" + "\n".join("  " + d for d in dups))
+
+
+def _changed_only(kyverno, text, read, tmp):
+    """The CLI's -o output holds every resource; keep the ones the policies
+    changed (#6). A missing namespace it fills in as `default` isn't a
+    change."""
+    docs = [d for _, d in split_docs(text)]
+    if not docs:
+        return text
+    given = {_identity(o): o for _, _, ds in read for _, o in ds if _identity(o)}
+    keep = []
+    for d, o in zip(docs, docs_to_json(kyverno, docs, tmp)):
+        before = given.get(_identity(o))
+        if before is not None and not ((before.get("metadata") or {}).get("namespace")) \
+                and isinstance(o.get("metadata"), dict) and "namespace" in o["metadata"]:
+            before = json.loads(json.dumps(before))
+            before.setdefault("metadata", {})["namespace"] = o["metadata"]["namespace"]
+        if before != o:
+            keep.append(d)
+    return "---\n".join(d.strip("\n") + "\n" for d in keep)
 
 
 # ---- expected findings --------------------------------------------------------------
@@ -787,8 +914,9 @@ _REGISTRY_HINT = re.compile(r"GET https?://|dial tcp|failed to fetch image|looku
 def _stage(args, tmp):
     """Policies, exceptions and resource files for apply and mutate, with
     offline_images and resource filters applied. Returns (staged, resources,
-    files, notes) or raises Failed: `resources` are the given files (for
-    messages), `files` what the CLI reads."""
+    files, read, notes) or raises Failed: `resources` are the given files
+    (for messages), `files` what the CLI reads, `read` its documents (see
+    _read_resources)."""
     res = lambda ps: [_resolve(p, args.runfiles) for p in ps]
     staged, notes = _stage_policies(res(args.policy + args.exception), tmp,
                                     args.kyverno, args.offline_images)
@@ -797,14 +925,21 @@ def _stage(args, tmp):
     resources = _resource_files(res(args.resource))
     if not resources:
         raise Failed("no resource files to check")
+    read = _read_resources(args.kyverno, resources, _shown(args, resources), tmp)
     files = resources
     if args.resource_filters:
         filters = _parse_filters(args.kyverno, _resolve(args.resource_filters, args.runfiles), tmp)
-        files, skipped = _apply_filters(args.kyverno, resources, filters, tmp)
+        read, files, skipped = _apply_filters(read, filters, tmp)
         notes.append(f"resourceFilters left out {skipped} document(s)")
         if not files:
             raise Failed("resourceFilters left no resources")
-    return staged, resources, files, notes
+    _duplicates(read)
+    return staged, resources, files, read, notes
+
+
+def _shown(args, files):
+    """Resource files as messages name them: relative to the runfiles."""
+    return [os.path.relpath(f, _resolve(".", args.runfiles)) if args.runfiles else f for f in files]
 
 
 def _apply_cmd(args, staged, files):
@@ -821,7 +956,7 @@ def _apply_cmd(args, staged, files):
 def cmd_apply(args):
     with tempfile.TemporaryDirectory() as tmp:
         try:
-            staged, resources, files, notes = _stage(args, tmp)
+            staged, resources, files, read, notes = _stage(args, tmp)
             expected = _expected(args.kyverno, _resolve(args.expected_findings, args.runfiles), tmp,
                                  args.expected_findings) \
                 if args.expected_findings else []
@@ -838,7 +973,11 @@ def cmd_apply(args):
             _log(f"kyverno {args.label}: kyverno apply failed (exit {r.returncode}):\n"
                  + (r.stderr.strip() or r.stdout.strip())[-3000:])
             return 2
-        mutated_text = _clean_mutated(mutated)
+        try:
+            mutated_text = _changed_only(args.kyverno, _clean_mutated(mutated), read, tmp)
+        except Failed as e:
+            _log(f"kyverno {args.label}: could not read the mutated resources: {e}")
+            return 2
         mutation_diff = []
         if args.expected_mutations:
             try:
@@ -850,8 +989,7 @@ def cmd_apply(args):
     if args.mutated:
         with open(args.mutated, "w") as f:
             f.write(mutated_text)
-    rel = [os.path.relpath(f, _resolve(".", args.runfiles)) if args.runfiles else f for f in resources]
-    origin = _origins(resources, rel)
+    origin = _origins(resources, _shown(args, resources))
     bad, warn, known, cases = [], [], [], []
     used = [False] * len(expected)
     registry = False
@@ -927,7 +1065,7 @@ def cmd_apply(args):
 def cmd_mutate(args):
     with tempfile.TemporaryDirectory() as tmp:
         try:
-            staged, _, files, notes = _stage(args, tmp)
+            staged, _, files, _, notes = _stage(args, tmp)
         except Failed as e:
             _log(f"kyverno_mutate {args.label}: {e}")
             return 2

@@ -101,7 +101,7 @@ tools/render_kyverno.sh 3.9.2                           # re-render the chart
 
 ### Test results (last full run: 2026-11-06)
 
-All 39 test targets pass on Linux x86_64 (Kyverno 1.19.2): 38 in `//tests/...` and the kind smoke on rootless podman. Other checks:
+All 46 test targets pass on Linux x86_64 (Kyverno 1.19.2): 45 in `//tests/...` and the kind smoke on rootless podman. Other checks:
 - `//tests/...` passes with network blocked in the sandbox (`--sandbox_default_allow_network=false`). The offline-image tests are tagged `block-network` regardless.
 - The three must-fail builds fail with the expected messages (CI checks them).
 - All four platform archives fetch, with the binary at their root.
@@ -109,7 +109,7 @@ All 39 test targets pass on Linux x86_64 (Kyverno 1.19.2): 38 in `//tests/...` a
 
 | Test target | What it verifies | Result |
 |---|---|---|
-| `//tests/bad:*_test` (14) | typo at top level and nested (with suggestion), wrong type, bad CEL, two validation types, not YAML, not a policy kind; bad CEL in an unbound VAP, a MAP and an IVP; with several files each problem names its file and a CEL compile error hides none; good policies (VAP/MAP among them) pass | PASSED |
+| `//tests/bad:*_test` (20) | typo at top level and nested (with suggestion), wrong type, bad CEL, two validation types, not YAML, not a policy kind; bad CEL in an unbound VAP, a MAP and an IVP; behind unmet matchConditions, a VAP's validation, variable, messageExpression and auditAnnotation and a MAP's mutation and variable fail, named by field; with several files each problem names its file and a CEL compile error hides none; good policies (VAP/MAP with every CEL field among them) pass | PASSED |
 | `//tests:suite_test` | `kyverno test` suite: ClusterPolicy + CEL ValidatingPolicy, pass and fail expectations | PASSED |
 | `//tests:suite_failure_test` | a wrong expectation fails, shows "Want pass, got fail", JUnit failure | PASSED |
 | `//tests:compliant_test` | a Deployment and a generated manifest comply | PASSED |
@@ -121,7 +121,8 @@ All 39 test targets pass on Linux x86_64 (Kyverno 1.19.2): 38 in `//tests/...` a
 | `//tests/apply:filters_test` | the chart's resourceFilters leave a kube-public Pod out | PASSED |
 | `//tests/apply:offline_digest_test`, `offline_strip_test` | no network: verifyImages + IVP reduced to a digest check (autogen too) / left out | PASSED |
 | `//tests/apply:expected_mutations_test` | mutated output equals the expected YAML (as data) | PASSED |
-| `//tests/apply:expected_failure_test` | an unlisted finding fails (source file named); a stale entry fails (JUnit); a malformed list is refused; mutations differing show a diff; online image verification fails with the offline_images hint | PASSED |
+| `//tests/apply:changed_only_test` | only the resource a policy changed is written and compared (Namespace, ConfigMap, untouched Pod left out; filled-in `default` namespace isn't a change) | PASSED |
+| `//tests/apply:expected_failure_test` | an unlisted finding fails (source file named); a stale entry fails (JUnit); a malformed list is refused; mutations differing show a diff; online image verification fails with the offline_images hint; a Role in two files is refused naming both, before the CLI runs | PASSED |
 | `//tests:checksums_test`, `//tests:version_test` | pins well-formed; DEFAULT_VERSION = MODULE.bazel = binary = chart images | PASSED |
 | `//tests:analysis_tests_*` (9) | provider bundling + index, validation outputs, kyverno_check's report + mutated output group, executables, empty srcs / suite / resources | PASSED |
 | `//tests/install_smoke:smoke_test` | kind: Kyverno + policies Ready; ClusterPolicy and CEL ValidatingPolicy deny, compliant Pod admitted | PASSED |

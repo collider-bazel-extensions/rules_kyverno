@@ -1,0 +1,9 @@
+# Only the Pod the mutation changed; the CLI puts it in namespace default.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: no-namespace
+  namespace: default
+  labels: {team: platform}
+spec:
+  containers: [{name: app, image: "registry.example/shop:1.0"}]

@@ -66,3 +66,55 @@ metadata:
   name: add-owner
 spec:
   policyName: add-owner
+---
+# Every CEL field, behind matchConditions the load probe doesn't meet (#5).
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: labelled-replicas
+spec:
+  paramKind: {apiVersion: v1, kind: ConfigMap}
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["apps"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["deployments"]
+  matchConditions:
+    - name: not-system
+      expression: '!object.metadata.namespace.startsWith("kube-")'
+  variables:
+    - name: labels
+      expression: "has(object.metadata.labels) ? object.metadata.labels : {}"
+    - name: team
+      expression: '"team" in variables.labels ? variables.labels["team"] : ""'
+  validations:
+    - expression: "variables.team != '' || object.spec.replicas <= int(params.data.max)"
+      messageExpression: "'unlabelled, ' + string(object.spec.replicas) + ' replicas'"
+  auditAnnotations:
+    - key: team
+      valueExpression: "variables.team == '' ? null : variables.team"
+---
+apiVersion: admissionregistration.k8s.io/v1alpha1
+kind: MutatingAdmissionPolicy
+metadata:
+  name: default-tier
+spec:
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["apps"]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["deployments"]
+  matchConditions:
+    - name: no-tier
+      expression: '!has(object.metadata.labels) || !("tier" in object.metadata.labels)'
+  variables:
+    - name: tier
+      expression: 'object.metadata.namespace == "prod" ? "gold" : "bronze"'
+  failurePolicy: Fail
+  reinvocationPolicy: Never
+  mutations:
+    - patchType: JSONPatch
+      jsonPatch:
+        expression: '[JSONPatch{op: "add", path: "/metadata/labels/tier", value: variables.tier}]'
