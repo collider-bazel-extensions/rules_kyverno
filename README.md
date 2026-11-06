@@ -39,6 +39,17 @@ git_override(
 )
 ```
 
+To pin by archive and integrity instead of a git tag, replace the first `git_override` with:
+
+```python
+archive_override(
+    module_name = "rules_kyverno",
+    urls = ["https://github.com/collider-bazel-extensions/rules_kyverno/archive/refs/tags/v0.1.0.tar.gz"],
+    strip_prefix = "rules_kyverno-0.1.0",
+    integrity = "sha256-xc7ZHthc4xvI9f5GvszfYhjSmwzeZRiXwUl+sqtpY7g=",
+)
+```
+
 That's all: rules_kyverno registers its toolchain and fetches the CLI only for the platform a build needs. To pick another pinned version, name it in your own `MODULE.bazel` (only the root module's tag counts):
 
 ```python
