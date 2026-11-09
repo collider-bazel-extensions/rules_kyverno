@@ -81,6 +81,10 @@ These came from monok8s, which ran its own driver around the CLI for them.
 - **Webhooks:** Kyverno creates its admission webhooks itself at start-up, so none are rendered. `kyverno_health_check` waits for the four controller Deployments.
 - **Policies:** `kyverno_policy_install` is `kubectl_apply` without `-n`, so namespaced policies keep their namespace. Kyverno compiles a policy and registers webhook rules for it after it's created, so "applied" isn't "enforced". `kyverno_policy_health_check` therefore reads each `kyverno_policy`'s index (written by its build-time check) and asks the cluster for each policy. A rule-bearing kind is ready when a `Ready` condition is `True` (or `status.ready` / `conditionStatus.ready`); other kinds when they exist. The smoke test checks admission right after, with server-side dry runs (`kubectl run --dry-run=server`), so no images are pulled.
 
+## Release archive contents (v0.2.2)
+
+`tests/` and `tools/` are `export-ignore` (`.gitattributes`): their packages load dev-only modules (rules_itest, rules_kind, rules_shell, rules_helm), which made `@rules_kyverno//...` unloadable for consumers. `REPO.bazel` `ignore_directories` would also hide them from this repo's own `bazel test`, so it isn't used. A `git_override` clone still contains them. CI's `consumer` job (`.github/consumer/check.sh`) checks the commit's `git archive`: the directories are absent and `@rules_kyverno//...` loads for a consumer.
+
 ## Not done
 
 - **Remote policy sources and `--git-branch` suites:** the rules are hermetic, so suites and policies come from the workspace.
