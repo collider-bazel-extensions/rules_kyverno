@@ -44,6 +44,8 @@ rules_kyverno/
     └── install_smoke/        # kind → kyverno_install → kyverno_policy_install → admission checks
 ```
 
+`tests/` and `tools/` load dev-only modules, so `.gitattributes` export-ignores them: the tag tarball leaves them out and `@rules_kyverno//...` loads for consumers. Nothing outside them may reference them (the dev-only `use_extension("//tools:...")` is fine). CI's `consumer` job (`.github/consumer/check.sh`) checks the commit's `git archive`.
+
 ## Key concepts
 
 - **Silent drops.** Kyverno drops a policy with any unknown field (or a non-YAML file) and exits 0. Hence the schema check against the CRDs (`//private:schemas`, extracted from the committed render at build time).

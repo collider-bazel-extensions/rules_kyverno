@@ -24,7 +24,7 @@ No host Kyverno or Helm needed. The CLI is the upstream release for linux and da
 ## Install (Bzlmod)
 
 ```python
-bazel_dep(name = "rules_kyverno", version = "0.2.1")
+bazel_dep(name = "rules_kyverno", version = "0.2.2")
 git_override(
     module_name = "rules_kyverno",
     remote = "https://github.com/collider-bazel-extensions/rules_kyverno",
@@ -39,6 +39,8 @@ git_override(
     commit = "81b60ab80df46b64c612f2576ffef0a7af98ccb6",  # v0.2.0
 )
 ```
+
+The release archive (the tag tarball) leaves out `tests/` and `tools/`, whose packages load dev-only modules, so `bazel query @rules_kyverno//...` works for consumers. A `git_override` clone still contains them; name packages instead (for example `@rules_kyverno//:all`).
 
 To pin by archive and integrity instead of a git tag, replace the first `git_override` with:
 
