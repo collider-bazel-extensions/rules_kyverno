@@ -28,7 +28,7 @@ bazel_dep(name = "rules_kyverno", version = "0.2.2")
 git_override(
     module_name = "rules_kyverno",
     remote = "https://github.com/collider-bazel-extensions/rules_kyverno",
-    tag = "v0.2.1",
+    tag = "v0.2.2",
 )
 
 # rules_kyverno depends on rules_kubectl, which isn't in the BCR either.
@@ -47,9 +47,9 @@ To pin by archive and integrity instead of a git tag, replace the first `git_ove
 ```python
 archive_override(
     module_name = "rules_kyverno",
-    urls = ["https://github.com/collider-bazel-extensions/rules_kyverno/archive/refs/tags/v0.2.1.tar.gz"],
-    strip_prefix = "rules_kyverno-0.2.1",
-    integrity = "sha256-v2gv0GISSGCoCz6q7tMdve0TYQ8c6ujcmZt+/pDF5zo=",
+    urls = ["https://github.com/collider-bazel-extensions/rules_kyverno/archive/refs/tags/v0.2.2.tar.gz"],
+    strip_prefix = "rules_kyverno-0.2.2",
+    integrity = "sha256-UXnIihi7QYGn1l9BwCJj3HXmH4w1sg50poMZYNoMAFo=",
 )
 ```
 
