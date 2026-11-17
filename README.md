@@ -24,11 +24,11 @@ No host Kyverno or Helm needed. The CLI is the upstream release for linux and da
 ## Install (Bzlmod)
 
 ```python
-bazel_dep(name = "rules_kyverno", version = "0.2.2")
+bazel_dep(name = "rules_kyverno", version = "0.2.3")
 git_override(
     module_name = "rules_kyverno",
     remote = "https://github.com/collider-bazel-extensions/rules_kyverno",
-    tag = "v0.2.2",
+    tag = "v0.2.3",
 )
 
 # rules_kyverno depends on rules_kubectl, which isn't in the BCR either.
@@ -47,8 +47,8 @@ To pin by archive and integrity instead of a git tag, replace the first `git_ove
 ```python
 archive_override(
     module_name = "rules_kyverno",
-    urls = ["https://github.com/collider-bazel-extensions/rules_kyverno/archive/refs/tags/v0.2.2.tar.gz"],
-    strip_prefix = "rules_kyverno-0.2.2",
+    urls = ["https://github.com/collider-bazel-extensions/rules_kyverno/archive/refs/tags/v0.2.3.tar.gz"],
+    strip_prefix = "rules_kyverno-0.2.3",
     integrity = "sha256-UXnIihi7QYGn1l9BwCJj3HXmH4w1sg50poMZYNoMAFo=",
 )
 ```
@@ -277,3 +277,9 @@ See [DESIGN.md](DESIGN.md) for the design and trade-offs, and [CLAUDE.md](CLAUDE
 Want Bazel rules for another tool or service?
 [Request a rules package](https://github.com/collider-bazel-extensions/.github/issues/new?template=request-a-rules-package.yml).
 The [organization page](https://github.com/collider-bazel-extensions) lists every package.
+
+## License
+
+[Apache License 2.0](LICENSE) (SPDX: `Apache-2.0`).
+
+Manifests in `private/manifests/` that are rendered from upstream charts or releases remain under their upstream projects' licences.
