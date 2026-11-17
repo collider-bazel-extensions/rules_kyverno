@@ -49,7 +49,7 @@ archive_override(
     module_name = "rules_kyverno",
     urls = ["https://github.com/collider-bazel-extensions/rules_kyverno/archive/refs/tags/v0.2.3.tar.gz"],
     strip_prefix = "rules_kyverno-0.2.3",
-    integrity = "sha256-UXnIihi7QYGn1l9BwCJj3HXmH4w1sg50poMZYNoMAFo=",
+    integrity = "sha256-H6/105pMXmV1Um+zfDuAh+iuOz66THzeAOL0PMwqwZc=",
 )
 ```
 
